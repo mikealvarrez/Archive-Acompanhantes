@@ -1,0 +1,8 @@
+jQuery(document).ready(function(){
+    jQuery('.btnwhats').click(function(){
+        let dataid = jQuery(this).attr('data-id');
+        let url = '/savewhatsapp.php?id='+dataid;
+        jQuery.get(url);
+        return true;
+    });
+});

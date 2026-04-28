@@ -1,0 +1,52 @@
+#janela_webcam {
+	height: 144px;
+	width: 260px;
+	background-image: url(../../js/webcam/fundo-janela.png);
+	background-repeat: no-repeat;
+	background-position: center center;
+	position:fixed;
+	right:21.67px;
+	bottom:12.67px;
+	z-index:100px;
+}
+#janela_webcam #cabecalho{
+	height: 19.2px;
+	padding-left: 240.4px;
+	padding-top: 2.8px;
+}
+#janela_webcam #foto{
+	height: 116.40px;
+	float: left;
+	padding-top: 5.60px;
+	padding-right: 9.60px;
+	padding-left: 5.60px;
+	width: 122.40px;
+}
+#janela_webcam #foto img{
+	border: 1px solid #ff0000;
+}
+#janela_webcam #info{
+	float: left;
+	width: 121.6px;
+	height: 62.93px;
+	padding-top: 15.67px;
+}
+#janela_webcam #info #nome{
+	font-family: Arial, Helvetica, sans-serif;
+	font-size: 18px;
+	color: #ff0000;
+	font-weight: bold;
+}
+#janela_webcam #info #idade{
+	font-family: Arial, Helvetica, sans-serif;
+	font-size: 12px;
+	color: #FFF;
+}
+#janela_webcam #btn{
+	width: 121.6px;
+	float: left;
+	height: 42.5px;
+}
+#janela_webcam #btn img{
+	margin-left:3px;
+}
