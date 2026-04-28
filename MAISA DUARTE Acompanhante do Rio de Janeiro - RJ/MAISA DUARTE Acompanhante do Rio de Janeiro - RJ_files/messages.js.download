@@ -1,0 +1,3 @@
+jQuery('.message .close').click(function () {
+    jQuery(this).parent('.message').fadeOut();
+});
