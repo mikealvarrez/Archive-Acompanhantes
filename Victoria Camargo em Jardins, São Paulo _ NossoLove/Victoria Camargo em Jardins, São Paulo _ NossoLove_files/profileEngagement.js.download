@@ -1,0 +1,439 @@
+/**
+ * Funções auxiliares para compartilhamento de conteúdo.
+ * NossoLove - uso em perfis e conteúdo público.
+ */
+(function (global) {
+    'use strict';
+
+    /**
+     * Compartilha uma URL: Web Share API se disponível, senão copia para a área de transferência.
+     * @param {string} url - URL para compartilhar
+     * @param {string} title - Título (ex: nome da modelo)
+     * @param {string} text - Texto opcional para compartilhar
+     * @returns {Promise<boolean>} true se compartilhou ou copiou com sucesso
+     */
+    function shareUrl(url, title, text) {
+        title = title || 'NossoLove';
+        text = text || 'Confira este conteúdo no NossoLove';
+
+        if (typeof navigator !== 'undefined' && navigator.share) {
+            return navigator.share({
+                title: title,
+                text: text,
+                url: url
+            }).then(function () { return true; }).catch(function () { return false; });
+        }
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(url).then(function () { return true; }).catch(function () { return false; });
+        }
+
+        var ta = document.createElement('textarea');
+        ta.value = url;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+            document.execCommand('copy');
+            return Promise.resolve(true);
+        } catch (e) {
+            return Promise.resolve(false);
+        } finally {
+            document.body.removeChild(ta);
+        }
+    }
+
+    // Expor funções globalmente
+    global.shareUrl = shareUrl;
+
+    // ==================== Exclusive Content Viewer ====================
+    // Bind touch/keyboard swipe para navegação no viewer inline de conteúdo exclusivo.
+    // As chaves de navegação chamam callbacks .NET via DotNetObjectReference.
+    let _evRef = null;
+    let _evStartX = 0;
+    let _evStartY = 0;
+    let _evTouching = false;
+
+    // Modo do gesto atual (null = ainda não decidido, 'h' = swipe horizontal p/ navegar,
+    // 'v' = drag vertical para dismiss visual)
+    let _evMode = null;
+    let _evContent = null;
+    let _evRoot = null;
+    const VERTICAL_DISMISS_THRESHOLD = 150; // px para fechar; abaixo disso volta ao centro
+
+    function evOnTouchStart(e) {
+        if (!e.touches || e.touches.length === 0) return;
+        _evStartX = e.touches[0].clientX;
+        _evStartY = e.touches[0].clientY;
+        _evTouching = true;
+        _evMode = null;
+        _evContent = document.querySelector('[data-nl-ev-content]');
+        _evRoot = document.getElementById('nl-ev-root');
+        // Remove qualquer animação residual
+        if (_evContent) {
+            _evContent.style.transition = 'none';
+            _evContent.style.transform = '';
+        }
+    }
+
+    function evOnTouchMove(e) {
+        if (!_evTouching || !e.touches || e.touches.length === 0) return;
+        const dx = e.touches[0].clientX - _evStartX;
+        const dy = e.touches[0].clientY - _evStartY;
+
+        // Decide o modo assim que passar de ~15px de movimento total
+        if (!_evMode && (Math.abs(dx) > 15 || Math.abs(dy) > 15)) {
+            _evMode = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
+        }
+
+        if (_evMode === 'v' && _evContent) {
+            // Acompanha o dedo — só translação vertical
+            _evContent.style.transform = 'translateY(' + dy + 'px)';
+            if (_evRoot) {
+                // Fundo fica quase transparente ao arrastar, mostrando o feed por trás
+                const dist = Math.min(Math.abs(dy), 400);
+                const alpha = Math.max(0, 0.95 - dist / 180);
+                _evRoot.style.backgroundColor = 'rgba(0,0,0,' + alpha + ')';
+            }
+        }
+    }
+
+    function evOnTouchEnd(e) {
+        if (!_evTouching || !e.changedTouches || e.changedTouches.length === 0) return;
+        _evTouching = false;
+        const dx = e.changedTouches[0].clientX - _evStartX;
+        const dy = e.changedTouches[0].clientY - _evStartY;
+        const mode = _evMode;
+        _evMode = null;
+
+        // Dismiss vertical: se ultrapassou threshold, fecha; senão volta ao centro.
+        if (mode === 'v' && _evContent) {
+            if (Math.abs(dy) >= VERTICAL_DISMISS_THRESHOLD) {
+                _evContent.style.transition = 'transform 200ms ease-out';
+                _evContent.style.transform = 'translateY(' + (dy > 0 ? 800 : -800) + 'px)';
+                if (_evRef) {
+                    setTimeout(() => {
+                        try { _evRef.invokeMethodAsync('NlExclusiveViewerClose'); } catch (_) {}
+                    }, 200);
+                }
+            } else {
+                // Snap back — restaura bg original (82%)
+                _evContent.style.transition = 'transform 220ms cubic-bezier(0.2, 0.9, 0.3, 1.1)';
+                _evContent.style.transform = 'translateY(0)';
+                if (_evRoot) _evRoot.style.backgroundColor = 'rgba(0,0,0,0.95)';
+                setTimeout(() => {
+                    if (_evContent) { _evContent.style.transition = ''; _evContent.style.transform = ''; }
+                }, 260);
+            }
+            return;
+        }
+
+        // Reset qualquer transform pendente
+        if (_evContent) { _evContent.style.transition = ''; _evContent.style.transform = ''; }
+        if (_evRoot) _evRoot.style.backgroundColor = 'rgba(0,0,0,0.82)';
+
+        // Swipe horizontal → navega
+        if (mode === 'h' && _evRef && Math.abs(dx) >= 60) {
+            try {
+                if (dx < 0) _evRef.invokeMethodAsync('NlExclusiveViewerNext');
+                else _evRef.invokeMethodAsync('NlExclusiveViewerPrev');
+            } catch (_) {}
+        }
+    }
+
+    function evOnKeyDown(e) {
+        if (!_evRef) return;
+        if (e.key === 'ArrowRight') { try { _evRef.invokeMethodAsync('NlExclusiveViewerNext'); } catch (_) {} }
+        else if (e.key === 'ArrowLeft') { try { _evRef.invokeMethodAsync('NlExclusiveViewerPrev'); } catch (_) {} }
+        else if (e.key === 'Escape') { try { _evRef.invokeMethodAsync('NlExclusiveViewerClose'); } catch (_) {} }
+    }
+
+    // Lock/unlock do scroll do body enquanto o viewer está aberto
+    let _evPrevBodyOverflow = '';
+    let _evPrevHtmlOverflow = '';
+    let _evPrevBodyTouch = '';
+
+    function evLockScroll() {
+        try {
+            _evPrevBodyOverflow = document.body.style.overflow || '';
+            _evPrevHtmlOverflow = document.documentElement.style.overflow || '';
+            _evPrevBodyTouch = document.body.style.touchAction || '';
+            document.body.style.overflow = 'hidden';
+            document.documentElement.style.overflow = 'hidden';
+            document.body.style.touchAction = 'none';
+        } catch (_) {}
+    }
+
+    function evUnlockScroll() {
+        try {
+            document.body.style.overflow = _evPrevBodyOverflow;
+            document.documentElement.style.overflow = _evPrevHtmlOverflow;
+            document.body.style.touchAction = _evPrevBodyTouch;
+        } catch (_) {}
+    }
+
+    global.nlExclusiveViewerBind = function (dotNetRef) {
+        // Desregistra binding anterior se houver
+        global.nlExclusiveViewerUnbind();
+        _evRef = dotNetRef;
+        const root = document.getElementById('nl-ev-root');
+        if (root) {
+            root.addEventListener('touchstart', evOnTouchStart, { passive: true });
+            root.addEventListener('touchmove', evOnTouchMove, { passive: true });
+            root.addEventListener('touchend', evOnTouchEnd, { passive: true });
+            root.addEventListener('touchcancel', evOnTouchEnd, { passive: true });
+        }
+        document.addEventListener('keydown', evOnKeyDown);
+        evLockScroll();
+    };
+
+    global.nlExclusiveViewerUnbind = function () {
+        const root = document.getElementById('nl-ev-root');
+        if (root) {
+            root.removeEventListener('touchstart', evOnTouchStart);
+            root.removeEventListener('touchmove', evOnTouchMove);
+            root.removeEventListener('touchend', evOnTouchEnd);
+            root.removeEventListener('touchcancel', evOnTouchEnd);
+        }
+        document.removeEventListener('keydown', evOnKeyDown);
+        _evRef = null;
+        evUnlockScroll();
+        // Limpa listeners de vídeo se ainda existirem
+        global.nlExclusiveVideoUnmount();
+    };
+
+    // ==================== Custom video controls ====================
+    // Conecta botões customizados (play/mute/fullscreen + progresso + tempo)
+    // a um <video> com id fornecido. Event listeners são guardados para remoção limpa.
+    const _evVidHandlers = [];
+
+    function formatTime(t) {
+        if (!isFinite(t) || t < 0) t = 0;
+        const m = Math.floor(t / 60);
+        const s = Math.floor(t % 60);
+        return m + ':' + (s < 10 ? '0' + s : s);
+    }
+
+    function addHandler(el, ev, fn, opts) {
+        if (!el) return;
+        el.addEventListener(ev, fn, opts);
+        _evVidHandlers.push({ el, ev, fn });
+    }
+
+    global.nlExclusiveVideoMount = function (videoId) {
+        global.nlExclusiveVideoUnmount();
+        const v = document.getElementById(videoId);
+        if (!v) return;
+        const playBtn = document.querySelector('[data-nl-vid-play]');
+        const playIcon = document.querySelector('[data-nl-vid-play-icon]');
+        const muteBtn = document.querySelector('[data-nl-vid-mute]');
+        const muteIcon = document.querySelector('[data-nl-vid-mute-icon]');
+        const fsBtn = document.querySelector('[data-nl-vid-fs]');
+        const timeEl = document.querySelector('[data-nl-vid-time]');
+        const progBar = document.querySelector('[data-nl-vid-seek]');
+        const progFill = document.querySelector('[data-nl-vid-prog-fill]');
+        const progThumb = document.querySelector('[data-nl-vid-thumb]');
+        const centerBtn = document.querySelector('[data-nl-vid-center-btn]');
+        const centerIcon = document.querySelector('[data-nl-vid-center-icon]');
+        const back10Btn = document.querySelector('[data-nl-vid-back10]');
+        const fwd10Btn = document.querySelector('[data-nl-vid-fwd10]');
+
+        const iconPlay = '<svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+        const iconPause = '<svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>';
+        const iconVolOn = '<svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.74 2.5-2.27 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
+        const iconVolOff = '<svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.17v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>';
+        const iconFs = '<svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>';
+
+        // Iniciar tocando (já veio de PlayCurrentExclusiveVideo)
+        try { v.muted = false; } catch (_) {}
+        v.play().catch(() => {});
+        if (playIcon) playIcon.innerHTML = iconPause;
+        if (muteIcon) muteIcon.innerHTML = iconVolOn;
+
+        // Auto-hide da UI do player: controles ficam visíveis por 3s após interação,
+        // fade out enquanto toca. Ao pausar ou tocar na tela, reaparecem.
+        const controlsBar = document.querySelector('[data-nl-vid-controls]');
+        let _uiHideTimer = null;
+        let _uiVisible = true;
+
+        const showUI = () => {
+            _uiVisible = true;
+            if (centerBtn) {
+                centerBtn.classList.remove('nl-ev-ui-hidden');
+                centerBtn.style.opacity = '1';
+                centerBtn.style.pointerEvents = 'auto';
+            }
+            if (controlsBar) controlsBar.classList.remove('nl-ev-ui-hidden');
+            if (_uiHideTimer) { clearTimeout(_uiHideTimer); _uiHideTimer = null; }
+            // Só agenda hide se vídeo está tocando
+            if (!v.paused && !v.ended) {
+                _uiHideTimer = setTimeout(() => {
+                    _uiVisible = false;
+                    if (centerBtn) {
+                        centerBtn.style.opacity = '0';
+                        centerBtn.style.pointerEvents = 'none';
+                    }
+                    if (controlsBar) controlsBar.classList.add('nl-ev-ui-hidden');
+                }, 2500);
+            }
+        };
+
+        const showCenterBtnOnly = () => {
+            // Usado em pause/play events; mostra o botão central brevemente independente da UI completa
+            if (centerBtn) {
+                centerBtn.classList.remove('nl-ev-ui-hidden');
+                centerBtn.style.opacity = '1';
+                centerBtn.style.pointerEvents = 'auto';
+            }
+        };
+
+        addHandler(v, 'play', () => {
+            if (playIcon) playIcon.innerHTML = iconPause;
+            if (centerIcon) centerIcon.innerHTML = iconPause;
+            showUI();
+        });
+        addHandler(v, 'pause', () => {
+            if (playIcon) playIcon.innerHTML = iconPlay;
+            if (centerIcon) centerIcon.innerHTML = iconPlay;
+            // Ao pausar, mantém visível sem timer (não auto-esconde)
+            _uiVisible = true;
+            if (_uiHideTimer) { clearTimeout(_uiHideTimer); _uiHideTimer = null; }
+            showCenterBtnOnly();
+            if (controlsBar) controlsBar.classList.remove('nl-ev-ui-hidden');
+        });
+        addHandler(v, 'volumechange', () => {
+            if (muteIcon) muteIcon.innerHTML = v.muted || v.volume === 0 ? iconVolOff : iconVolOn;
+        });
+        const updateProgress = () => {
+            if (v.duration) {
+                const pct = (v.currentTime / v.duration) * 100;
+                if (progFill) progFill.style.width = pct + '%';
+                if (progThumb) progThumb.style.left = pct + '%';
+            }
+            if (timeEl) timeEl.textContent = formatTime(v.currentTime) + ' / ' + formatTime(v.duration);
+        };
+        addHandler(v, 'timeupdate', updateProgress);
+        addHandler(v, 'loadedmetadata', updateProgress);
+
+        addHandler(playBtn, 'click', (e) => {
+            e.stopPropagation();
+            if (v.paused) v.play().catch(() => {}); else v.pause();
+        });
+        addHandler(muteBtn, 'click', (e) => {
+            e.stopPropagation();
+            v.muted = !v.muted;
+        });
+        addHandler(fsBtn, 'click', (e) => {
+            e.stopPropagation();
+            try {
+                if (document.fullscreenElement) document.exitFullscreen();
+                else if (v.requestFullscreen) v.requestFullscreen();
+                else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
+            } catch (_) {}
+        });
+
+        // 10 segundos para trás / frente
+        addHandler(back10Btn, 'click', (e) => {
+            e.stopPropagation();
+            v.currentTime = Math.max(0, v.currentTime - 10);
+        });
+        addHandler(fwd10Btn, 'click', (e) => {
+            e.stopPropagation();
+            if (v.duration) v.currentTime = Math.min(v.duration, v.currentTime + 10);
+        });
+        // Drag scrubbing: mouse e touch. Arrastar a bolinha ou a própria barra atualiza
+        // o currentTime em tempo real; soltar persiste. Pausa durante o drag para UX suave.
+        let _scrubbing = false;
+        let _wasPlaying = false;
+
+        const seekFromClientX = (clientX) => {
+            if (!v.duration || !progBar) return;
+            const rect = progBar.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+            v.currentTime = pct * v.duration;
+            if (progFill) progFill.style.width = (pct * 100) + '%';
+            if (progThumb) progThumb.style.left = (pct * 100) + '%';
+            if (timeEl) timeEl.textContent = formatTime(v.currentTime) + ' / ' + formatTime(v.duration);
+        };
+
+        const startScrub = (clientX) => {
+            if (!v.duration) return;
+            _scrubbing = true;
+            _wasPlaying = !v.paused;
+            try { v.pause(); } catch (_) {}
+            seekFromClientX(clientX);
+        };
+        const endScrub = () => {
+            if (!_scrubbing) return;
+            _scrubbing = false;
+            if (_wasPlaying) { try { v.play().catch(() => {}); } catch (_) {} }
+        };
+
+        // Mouse
+        addHandler(progBar, 'mousedown', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            startScrub(e.clientX);
+        });
+        addHandler(document, 'mousemove', (e) => {
+            if (_scrubbing) seekFromClientX(e.clientX);
+        });
+        addHandler(document, 'mouseup', () => endScrub());
+
+        // Touch
+        addHandler(progBar, 'touchstart', (e) => {
+            e.stopPropagation();
+            if (!e.touches || e.touches.length === 0) return;
+            startScrub(e.touches[0].clientX);
+        }, { passive: true });
+        addHandler(document, 'touchmove', (e) => {
+            if (_scrubbing && e.touches && e.touches.length > 0) {
+                seekFromClientX(e.touches[0].clientX);
+            }
+        }, { passive: true });
+        addHandler(document, 'touchend', () => endScrub());
+        addHandler(document, 'touchcancel', () => endScrub());
+
+        // Clique no vídeo:
+        // - UI escondida → só revela (NÃO dá toggle de play/pause)
+        // - UI visível → alterna play/pause e reseta timer
+        addHandler(v, 'click', (e) => {
+            e.stopPropagation();
+            if (!_uiVisible) {
+                showUI();
+                return;
+            }
+            if (v.paused) v.play().catch(() => {}); else v.pause();
+            showUI();
+        });
+
+        // Clique no botão central sempre alterna (já está visível por definição)
+        addHandler(centerBtn, 'click', (e) => {
+            e.stopPropagation();
+            if (v.paused) v.play().catch(() => {}); else v.pause();
+            showUI();
+        });
+
+        // Qualquer interação nos controles reseta o timer (mostra + reagenda hide)
+        [playBtn, muteBtn, fsBtn, progBar].forEach(el => {
+            if (!el) return;
+            addHandler(el, 'click', () => showUI());
+            addHandler(el, 'touchstart', () => showUI(), { passive: true });
+        });
+
+        // Estado inicial: começa tocando → ícone pause, UI visível + timer ativo
+        if (centerIcon) centerIcon.innerHTML = iconPause;
+        showUI();
+
+        if (fsBtn) fsBtn.innerHTML = iconFs;
+    };
+
+    global.nlExclusiveVideoUnmount = function () {
+        while (_evVidHandlers.length) {
+            const h = _evVidHandlers.pop();
+            try { h.el.removeEventListener(h.ev, h.fn); } catch (_) {}
+        }
+    };
+
+})(typeof window !== 'undefined' ? window : this);

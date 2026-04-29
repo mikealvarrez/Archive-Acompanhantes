@@ -1,0 +1,240 @@
+// Performance monitoring utilities for NossoLove
+// These functions are called from Blazor components to log performance metrics
+
+window.NossoLovePerf = {
+    // Flag to enable/disable logging
+    enabled: true,
+
+    // Store for tracking page load times
+    _metrics: {},
+    _startTimes: {},
+    _pendingLogs: [],
+
+    // Enable/disable logging
+    setEnabled: function (enabled) {
+        this.enabled = enabled;
+        if (enabled) {
+            console.log('%c[⚡ PERF] Performance logging ENABLED', 'color: #2ed573; font-weight: bold;');
+        } else {
+            console.log('%c[⚡ PERF] Performance logging DISABLED', 'color: #ff6b6b; font-weight: bold;');
+        }
+    },
+
+    // Log from server (called via JSInterop)
+    logFromServer: function (category, message, elapsedMs, details) {
+        if (!this.enabled) return;
+
+        const timestamp = new Date().toLocaleTimeString('pt-BR', { hour12: false, fractionalSecondDigits: 3 });
+        const color = elapsedMs > 500 ? '#ff6b6b' : elapsedMs > 100 ? '#ffa502' : '#2ed573';
+        const emoji = elapsedMs > 500 ? '🔴' : elapsedMs > 100 ? '🟡' : '🟢';
+
+        let logMessage = `[⚡ PERF] [${timestamp}] [${category}] ${emoji} ${message}: ${elapsedMs.toFixed(2)}ms`;
+        if (details) {
+            logMessage += ` | ${details}`;
+        }
+
+        console.log(`%c${logMessage}`, `color: ${color}; font-weight: bold;`);
+
+        // Store metric
+        this._metrics[`${category}_${message}`] = {
+            elapsed: elapsedMs,
+            timestamp: timestamp,
+            details: details
+        };
+    },
+
+    // Log info message from server
+    logInfo: function (category, message, details) {
+        if (!this.enabled) return;
+
+        const timestamp = new Date().toLocaleTimeString('pt-BR', { hour12: false, fractionalSecondDigits: 3 });
+        let logMessage = `[⚡ PERF] [${timestamp}] [${category}] ℹ️ ${message}`;
+        if (details) {
+            logMessage += ` | ${details}`;
+        }
+
+        console.log(`%c${logMessage}`, 'color: #74b9ff; font-weight: bold;');
+    },
+
+    // Log error from server
+    logError: function (category, message, error) {
+        if (!this.enabled) return;
+
+        const timestamp = new Date().toLocaleTimeString('pt-BR', { hour12: false, fractionalSecondDigits: 3 });
+        let logMessage = `[⚡ PERF] [${timestamp}] [${category}] ❌ ${message}`;
+        if (error) {
+            logMessage += ` | Error: ${error}`;
+        }
+
+        console.error(logMessage);
+    },
+
+    // Log cache status
+    logCache: function (category, operation, elapsedMs, cacheHit, itemCount) {
+        if (!this.enabled) return;
+
+        const timestamp = new Date().toLocaleTimeString('pt-BR', { hour12: false, fractionalSecondDigits: 3 });
+        const color = elapsedMs > 500 ? '#ff6b6b' : elapsedMs > 100 ? '#ffa502' : '#2ed573';
+        const emoji = elapsedMs > 500 ? '🔴' : elapsedMs > 100 ? '🟡' : '🟢';
+        const cacheEmoji = cacheHit ? '💾' : '🔄';
+        const cacheStatus = cacheHit ? 'CACHE HIT' : 'CACHE MISS';
+
+        let logMessage = `[⚡ PERF] [${timestamp}] [${category}] ${emoji} ${cacheEmoji} ${operation}: ${elapsedMs.toFixed(2)}ms (${cacheStatus})`;
+        if (itemCount !== undefined && itemCount !== null) {
+            logMessage += ` | items: ${itemCount}`;
+        }
+
+        console.log(`%c${logMessage}`, `color: ${color}; font-weight: bold;`);
+    },
+
+    // Log group start
+    logGroupStart: function (category, title) {
+        if (!this.enabled) return;
+        console.groupCollapsed(`%c[⚡ PERF] [${category}] 📊 ${title}`, 'color: #74b9ff; font-weight: bold;');
+    },
+
+    // Log group end
+    logGroupEnd: function () {
+        if (!this.enabled) return;
+        console.groupEnd();
+    },
+
+    // Log table data
+    logTable: function (data) {
+        if (!this.enabled) return;
+        console.table(data);
+    },
+
+    // Start timing an operation
+    start: function (operationName) {
+        if (!this.enabled) return;
+        this._startTimes[operationName] = performance.now();
+        const timestamp = new Date().toLocaleTimeString('pt-BR', { hour12: false, fractionalSecondDigits: 3 });
+        console.log(`%c[⚡ PERF] [${timestamp}] ⏱️ ${operationName} started`, 'color: #74b9ff;');
+    },
+
+    // End timing and log the result
+    end: function (operationName, additionalInfo) {
+        if (!this.enabled) return;
+
+        const startTime = this._startTimes[operationName];
+        if (!startTime) {
+            console.warn(`[⚡ PERF] No start time found for: ${operationName}`);
+            return;
+        }
+
+        const elapsed = performance.now() - startTime;
+        this._metrics[operationName] = elapsed;
+
+        const timestamp = new Date().toLocaleTimeString('pt-BR', { hour12: false, fractionalSecondDigits: 3 });
+        const color = elapsed > 500 ? '#ff6b6b' : elapsed > 100 ? '#ffa502' : '#2ed573';
+        const emoji = elapsed > 500 ? '🔴' : elapsed > 100 ? '🟡' : '🟢';
+
+        let message = `[⚡ PERF] [${timestamp}] ${emoji} ${operationName}: ${elapsed.toFixed(2)}ms`;
+        if (additionalInfo) {
+            message += ` | ${additionalInfo}`;
+        }
+
+        console.log(`%c${message}`, `color: ${color}; font-weight: bold;`);
+        delete this._startTimes[operationName];
+
+        return elapsed;
+    },
+
+    // Show all collected metrics
+    showMetrics: function () {
+        console.group('%c📊 NossoLove Performance Metrics', 'color: #74b9ff; font-weight: bold; font-size: 14px;');
+        console.table(this._metrics);
+        console.groupEnd();
+    },
+
+    // Clear all metrics
+    clearMetrics: function () {
+        this._metrics = {};
+        this._startTimes = {};
+        console.log('%c[⚡ PERF] Metrics cleared', 'color: #a29bfe;');
+    },
+
+    // Get Core Web Vitals
+    getWebVitals: function () {
+        const vitals = {};
+
+        // Navigation Timing
+        if (performance.getEntriesByType) {
+            const navTiming = performance.getEntriesByType('navigation')[0];
+            if (navTiming) {
+                vitals.domContentLoaded = navTiming.domContentLoadedEventEnd - navTiming.startTime;
+                vitals.loadComplete = navTiming.loadEventEnd - navTiming.startTime;
+                vitals.ttfb = navTiming.responseStart - navTiming.requestStart;
+                vitals.domInteractive = navTiming.domInteractive - navTiming.startTime;
+            }
+        }
+
+        // Paint Timing
+        if (performance.getEntriesByType) {
+            const paintEntries = performance.getEntriesByType('paint');
+            paintEntries.forEach(entry => {
+                if (entry.name === 'first-paint') {
+                    vitals.firstPaint = entry.startTime;
+                }
+                if (entry.name === 'first-contentful-paint') {
+                    vitals.firstContentfulPaint = entry.startTime;
+                }
+            });
+        }
+
+        console.group('%c🌐 Core Web Vitals', 'color: #fd79a8; font-weight: bold; font-size: 14px;');
+        console.table(vitals);
+        console.groupEnd();
+
+        return vitals;
+    },
+
+    // Monitor Largest Contentful Paint
+    observeLCP: function () {
+        if ('PerformanceObserver' in window) {
+            try {
+                const observer = new PerformanceObserver((list) => {
+                    const entries = list.getEntries();
+                    const lastEntry = entries[entries.length - 1];
+                    if (this.enabled) {
+                        console.log(
+                            `%c[⚡ PERF] 🖼️ LCP: ${lastEntry.startTime.toFixed(2)}ms`,
+                            lastEntry.startTime > 2500 ? 'color: #ff6b6b; font-weight: bold;' :
+                                lastEntry.startTime > 1000 ? 'color: #ffa502; font-weight: bold;' :
+                                    'color: #2ed573; font-weight: bold;'
+                        );
+                    }
+                });
+                observer.observe({ type: 'largest-contentful-paint', buffered: true });
+            } catch (e) {
+                // LCP observer not supported
+            }
+        }
+    },
+
+    // Initialize performance monitoring
+    init: function () {
+        console.log('%c⚡ NossoLove Performance Monitor Initialized', 'color: #e17055; font-weight: bold; font-size: 16px;');
+        console.log('%cCommands: NossoLovePerf.showMetrics() | NossoLovePerf.getWebVitals() | NossoLovePerf.setEnabled(true/false)', 'color: #636e72;');
+
+        // Start observing LCP
+        this.observeLCP();
+
+        // Log initial page load time
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                if (this.enabled) {
+                    this.getWebVitals();
+                }
+            }, 100);
+        });
+    }
+};
+
+// Auto-initialize
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => NossoLovePerf.init());
+} else {
+    NossoLovePerf.init();
+}

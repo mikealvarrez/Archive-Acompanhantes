@@ -1,0 +1,124 @@
+// Lazy Loading para imagens - Melhora LCP e performance
+function initLazyLoading() {
+    // Verifica se o navegador suporta Intersection Observer
+    if ('IntersectionObserver' in window) {
+        const imageObserver = new IntersectionObserver((entries, observer) => {
+            entries.forEach((entry) => {
+                if (entry.isIntersecting) {
+                    const img = entry.target;
+
+                    // Carrega a imagem
+                    if (img.dataset.src) {
+                        img.src = img.dataset.src;
+                        img.classList.remove('lazy');
+                        img.classList.add('loaded');
+                    }
+
+                    // Para de observar após carregar
+                    imageObserver.unobserve(img);
+                }
+            });
+        }, {
+            // Começa a carregar quando a imagem está a 50px de entrar na viewport
+            rootMargin: '50px 0px',
+            threshold: 0.01
+        });
+
+        // Observa todas as imagens com classe 'lazy'
+        const lazyImages = document.querySelectorAll('img.lazy');
+        lazyImages.forEach(img => imageObserver.observe(img));
+
+        // Também observa novas imagens adicionadas dinamicamente
+        const mutationObserver = new MutationObserver((mutations) => {
+            mutations.forEach((mutation) => {
+                mutation.addedNodes.forEach((node) => {
+                    if (node.nodeType === 1) { // Element node
+                        const lazyImgs = node.querySelectorAll ? node.querySelectorAll('img.lazy') : [];
+                        lazyImgs.forEach(img => imageObserver.observe(img));
+                    }
+                });
+            });
+        });
+
+        mutationObserver.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+    } else {
+        // Fallback para navegadores antigos
+        const lazyImages = document.querySelectorAll('img.lazy');
+        lazyImages.forEach(img => {
+            if (img.dataset.src) {
+                img.src = img.dataset.src;
+                img.classList.remove('lazy');
+            }
+        });
+    }
+}
+
+// Preload de imagens críticas para melhorar LCP
+function preloadCriticalImages() {
+    const criticalImages = [
+        '/images/logo.svg'
+    ];
+
+    criticalImages.forEach(src => {
+        const link = document.createElement('link');
+        link.rel = 'preload';
+        link.as = 'image';
+        link.href = src;
+        document.head.appendChild(link);
+    });
+}
+
+// Otimiza fontes para reduzir CLS
+function optimizeFonts() {
+    // Adiciona font-display: swap para todas as fontes
+    const style = document.createElement('style');
+    style.textContent = `
+        @font-face {
+            font-display: swap;
+        }
+
+        /* Previne layout shift durante carregamento */
+        .lazy {
+            background-color: #27272a;
+            min-height: 200px;
+        }
+
+        .lazy.loaded {
+            min-height: auto;
+            background-color: transparent;
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+// Detecta se o dispositivo é mobile baseado na largura da tela
+// Retorna true para mobile (< 768px), false para desktop
+function isMobileDevice() {
+    // Primeiro tenta usar o matchMedia que é mais confiável
+    if (window.matchMedia) {
+        return window.matchMedia('(max-width: 767px)').matches;
+    }
+    // Fallback para window.innerWidth
+    return window.innerWidth < 768;
+}
+
+// Inicializa otimizações quando o DOM estiver pronto
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+        preloadCriticalImages();
+        optimizeFonts();
+    });
+} else {
+    preloadCriticalImages();
+    optimizeFonts();
+}
+
+// Exporta função para Blazor
+window.isMobileDevice = isMobileDevice;
+
+// Exporta função para Blazor
+window.initLazyLoading = initLazyLoading;

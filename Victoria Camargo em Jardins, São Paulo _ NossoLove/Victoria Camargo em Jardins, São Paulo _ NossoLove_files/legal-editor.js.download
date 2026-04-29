@@ -1,0 +1,76 @@
+/**
+ * Quill WYSIWYG para Documentos Legais (Termos de Uso / Política de Privacidade).
+ * Usa Quill já presente em /lib/quill/. Exposto para Blazor JSInterop.
+ */
+(function () {
+    'use strict';
+    var editors = {};
+
+    function getQuill() {
+        return typeof window.Quill !== 'undefined' ? window.Quill : null;
+    }
+
+    var LegalEditor = {
+        init: function (id, initialHtml) {
+            var el = document.getElementById(id);
+            if (!el) return false;
+            var Quill = getQuill();
+            if (!Quill) {
+                console.warn('LegalEditor: Quill não carregado.');
+                return false;
+            }
+            if (editors[id]) {
+                try { editors[id].destroy(); } catch (e) {}
+                editors[id] = null;
+            }
+            el.innerHTML = '';
+            var q = new Quill(el, {
+                theme: 'snow',
+                placeholder: 'Digite o conteúdo...',
+                modules: {
+                    toolbar: [
+                        [{ header: [1, 2, 3, false] }],
+                        ['bold', 'italic', 'underline'],
+                        [{ list: 'ordered' }, { list: 'bullet' }],
+                        ['link'],
+                        ['clean']
+                    ]
+                }
+            });
+            if (typeof initialHtml === 'string' && initialHtml.trim()) {
+                try {
+                    q.clipboard.dangerouslyPasteHTML(initialHtml);
+                } catch (err) {
+                    q.setText(initialHtml.replace(/<[^>]+>/g, ''));
+                }
+            }
+            editors[id] = q;
+            return true;
+        },
+        getHtml: function (id) {
+            var q = editors[id];
+            if (!q) return '';
+            return (q.root && q.root.innerHTML) ? q.root.innerHTML : '';
+        },
+        setHtml: function (id, html) {
+            var q = editors[id];
+            if (!q) return false;
+            try {
+                q.clipboard.dangerouslyPasteHTML(html || '', 'silent');
+            } catch (e) {
+                q.setText((html || '').replace(/<[^>]+>/g, ''));
+            }
+            return true;
+        },
+        destroy: function (id) {
+            var q = editors[id];
+            if (q) {
+                try { q.destroy(); } catch (e) {}
+                editors[id] = null;
+            }
+        }
+    };
+
+    window.LegalEditor = LegalEditor;
+    // Blazor invoca por path "LegalEditor.init" e "LegalEditor.getHtml"
+})();

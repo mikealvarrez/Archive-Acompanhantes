@@ -1,0 +1,162 @@
+(function() {
+    const STORAGE_KEY = 'nosso_love_censorship';
+
+    // 1. Expose API for Blazor (Defined early to ensure availability)
+    window.adminCensorship = {
+        set: function(shouldEnable) {
+            localStorage.setItem(STORAGE_KEY, shouldEnable);
+            if (shouldEnable) {
+                enableCensorshipUI();
+            } else {
+                disableCensorshipUI();
+            }
+        },
+        get: function() {
+            return localStorage.getItem(STORAGE_KEY) === 'true';
+        }
+    };
+
+    // 2. Core Logic
+    function enableCensorshipUI() {
+        // A. Inject CSS immediately (Safe in <head>)
+        if (!document.getElementById('censorship-style-base')) {
+            const style = document.createElement('style');
+            style.id = 'censorship-style-base';
+            // CSS Selectors for immediate coverage (Zero Flash)
+            style.innerHTML = `
+                img[src*="/api/files/"], img[src*="/uploads/"],
+                video[src*="/api/files/"], video[src*="/uploads/"],
+                [style*="/api/files/"], [style*="/uploads/"] {
+                    filter: blur(20px) !important;
+                    transition: none !important;
+                }
+
+                /* Protect System Assets explicitly just in case */
+                img[src*="/images/"], img[src*="logo"], img[src*="icon"] {
+                    filter: none !important;
+                }
+            `;
+            // Head always exists when scripts run
+            if (document.head) {
+                document.head.appendChild(style);
+            } else {
+                document.documentElement.appendChild(style);
+            }
+        }
+
+        // B. Add Body Class (Wait for Body if needed)
+        if (document.body) {
+            document.body.classList.add('content-censorship-active');
+            startScanning();
+        } else {
+            // If body doesn't exist yet, wait for it
+            document.addEventListener('DOMContentLoaded', () => {
+                if (document.body) {
+                    document.body.classList.add('content-censorship-active');
+                    startScanning();
+                }
+            });
+        }
+    }
+
+    function disableCensorshipUI() {
+        if (document.body) {
+            document.body.classList.remove('content-censorship-active');
+        }
+
+        const style = document.getElementById('censorship-style-base');
+        if (style) style.remove();
+
+        stopScanning();
+
+        // Cleanup inline styles added by scanner
+        document.querySelectorAll('.censored-content-refined').forEach(el => {
+            el.classList.remove('censored-content-refined');
+            el.style.clipPath = '';
+        });
+    }
+
+    // 3. Dynamic Scanning Logic (MutationObserver)
+    let _observer = null;
+    let _resizeHandler = null;
+
+    function startScanning() {
+        // Ensure we don't start multiple observers
+        stopScanning();
+
+        if (document.body) {
+             scanAndRefine();
+        }
+
+        if (!_observer) {
+            // Need to observe body, so ensure body exists
+            const target = document.body || document.documentElement;
+            if (target) {
+                _observer = new MutationObserver(() => {
+                     // Debounce slightly or run directly
+                     scanAndRefine();
+                });
+                _observer.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'style', 'class'] });
+            }
+        }
+
+        if (!_resizeHandler) {
+            _resizeHandler = () => requestAnimationFrame(scanAndRefine);
+            window.addEventListener('resize', _resizeHandler);
+        }
+    }
+
+    function stopScanning() {
+        if (_observer) {
+            _observer.disconnect();
+            _observer = null;
+        }
+        if (_resizeHandler) {
+            window.removeEventListener('resize', _resizeHandler);
+            _resizeHandler = null;
+        }
+    }
+
+    function scanAndRefine() {
+        const targets = document.querySelectorAll('img[src*="/api/files/"], img[src*="/uploads/"], video');
+
+        targets.forEach(el => {
+            const src = el.getAttribute('src') || '';
+            if (src.includes('/images/') || src.includes('logo')) return;
+
+            if (!el.classList.contains('censored-content-refined')) {
+                el.classList.add('censored-content-refined');
+            }
+
+            try {
+                if (el.classList.contains('rounded-full')) {
+                    el.style.clipPath = 'inset(0 round 50%)';
+                } else {
+                    const radius = window.getComputedStyle(el).borderRadius;
+                    if (radius && radius !== '0px') {
+                        el.style.clipPath = `inset(0 round ${radius})`;
+                    } else {
+                        el.style.clipPath = 'inset(0)';
+                    }
+                }
+            } catch (e) {
+                // Fallback
+            }
+        });
+    }
+
+    // 4. Immediate Check (Run on load)
+    function checkAndInjectInfo() {
+        try {
+            const isCensored = localStorage.getItem(STORAGE_KEY) === 'true';
+            if (isCensored) {
+                enableCensorshipUI();
+            }
+        } catch (e) {
+            console.warn('Admin censorship check failed:', e);
+        }
+    }
+
+    checkAndInjectInfo();
+
+})();

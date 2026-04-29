@@ -1,0 +1,66 @@
+// Prevents downloading/saving of images and videos site-wide.
+
+(function () {
+    // Block context menu on media elements
+    document.addEventListener('contextmenu', function (e) {
+        var t = e.target;
+        if (t && (t.tagName === 'IMG' || t.tagName === 'VIDEO' || t.tagName === 'SOURCE' || t.closest('video'))) {
+            e.preventDefault();
+        }
+    }, true);
+
+    // Block drag on images
+    document.addEventListener('dragstart', function (e) {
+        if (e.target && (e.target.tagName === 'IMG' || e.target.tagName === 'VIDEO')) {
+            e.preventDefault();
+        }
+    }, true);
+
+    // Patch all existing and future video elements to disable download controls
+    function protectVideo(video) {
+        if (!video || video.dataset.mediaProtected) return;
+        video.setAttribute('controlsList', 'nodownload noplaybackrate');
+        video.setAttribute('disablePictureInPicture', '');
+        video.setAttribute('oncontextmenu', 'return false;');
+        video.dataset.mediaProtected = '1';
+    }
+
+    function protectImage(img) {
+        if (!img || img.dataset.mediaProtected) return;
+        img.setAttribute('draggable', 'false');
+        img.dataset.mediaProtected = '1';
+    }
+
+    function protectAll() {
+        document.querySelectorAll('video').forEach(protectVideo);
+        document.querySelectorAll('img').forEach(protectImage);
+    }
+
+    // Observe DOM mutations to catch dynamically added media
+    var observer = new MutationObserver(function (mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+            var nodes = mutations[i].addedNodes;
+            for (var j = 0; j < nodes.length; j++) {
+                var node = nodes[j];
+                if (node.nodeType !== 1) continue;
+                if (node.tagName === 'VIDEO') protectVideo(node);
+                else if (node.tagName === 'IMG') protectImage(node);
+                if (node.querySelectorAll) {
+                    node.querySelectorAll('video').forEach(protectVideo);
+                    node.querySelectorAll('img').forEach(protectImage);
+                }
+            }
+        }
+    });
+
+    // Start after DOM is ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () {
+            protectAll();
+            observer.observe(document.body, { childList: true, subtree: true });
+        });
+    } else {
+        protectAll();
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
+})();

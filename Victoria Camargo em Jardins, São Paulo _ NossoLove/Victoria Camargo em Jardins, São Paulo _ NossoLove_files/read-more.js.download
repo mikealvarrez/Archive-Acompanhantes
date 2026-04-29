@@ -1,0 +1,65 @@
+(() => {
+    const SELECTOR = '[data-read-more]';
+
+    function setupReadMore(container) {
+        if (!container || container.dataset.readMoreInitialized === 'true') {
+            return;
+        }
+
+        const content = container.querySelector('[data-read-more-content]');
+        const toggle = container.querySelector('[data-read-more-toggle]');
+
+        if (!content || !toggle) {
+            return;
+        }
+
+        const collapsedHeight = Number.parseInt(container.dataset.collapsedHeight || '220', 10);
+        const lineHeight = Number.parseFloat(window.getComputedStyle(content).lineHeight || '0');
+        const minimumExpandedHeight = lineHeight > 0 ? collapsedHeight + lineHeight : collapsedHeight + 24;
+
+        const applyState = (expanded) => {
+            container.dataset.expanded = expanded ? 'true' : 'false';
+            content.style.maxHeight = expanded ? `${content.scrollHeight}px` : `${collapsedHeight}px`;
+            content.style.overflow = 'hidden';
+            toggle.textContent = expanded ? 'Ler menos' : 'Ler mais';
+        };
+
+        requestAnimationFrame(() => {
+            if (content.scrollHeight <= minimumExpandedHeight) {
+                toggle.classList.add('hidden');
+                container.dataset.readMoreInitialized = 'true';
+                return;
+            }
+
+            applyState(false);
+            toggle.classList.remove('hidden');
+            toggle.addEventListener('click', () => {
+                const expanded = container.dataset.expanded === 'true';
+                applyState(!expanded);
+            });
+            container.dataset.readMoreInitialized = 'true';
+        });
+    }
+
+    function initReadMore(root = document) {
+        root.querySelectorAll(SELECTOR).forEach(setupReadMore);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => initReadMore(), { once: true });
+    } else {
+        initReadMore();
+    }
+
+    const observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+            if (mutation.addedNodes.length > 0) {
+                initReadMore();
+                break;
+            }
+        }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.initReadMore = initReadMore;
+})();

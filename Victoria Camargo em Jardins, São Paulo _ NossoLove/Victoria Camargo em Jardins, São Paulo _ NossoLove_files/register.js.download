@@ -1,0 +1,136 @@
+(function(){
+  const state = { bound: false, handlers: {} };
+
+  function setCaret(el, pos){
+    if(el.setSelectionRange){ el.setSelectionRange(pos,pos); }
+  }
+
+  function onlyDigits(s){ return (s||"").replace(/\D+/g, ""); }
+
+  function formatCPF(d){
+    d = d.slice(0,11);
+    if(d.length<=3) return d;
+    if(d.length<=6) return d.slice(0,3)+"."+d.slice(3);
+    if(d.length<=9) return d.slice(0,3)+"."+d.slice(3,6)+"."+d.slice(6);
+    return d.slice(0,3)+"."+d.slice(3,6)+"."+d.slice(6,9)+"-"+d.slice(9);
+  }
+
+  function maskInput(el, formatter, maxLen){
+    const start = el.selectionStart||0;
+    const before = el.value;
+    const digits = onlyDigits(before);
+    const formatted = formatter(digits);
+    el.value = formatted;
+    let newPos = start;
+    const map = new Map();
+    let di=0; for(let i=0;i<formatted.length;i++){ if(/\d/.test(formatted[i])){ map.set(di,i); di++; } }
+    const prevDigitsBeforeCaret = onlyDigits(before.slice(0,start)).length;
+    if(map.has(prevDigitsBeforeCaret)) newPos = map.get(prevDigitsBeforeCaret);
+    else if(map.has(prevDigitsBeforeCaret-1)) newPos = map.get(prevDigitsBeforeCaret-1)+1;
+    newPos = Math.min(formatted.length, Math.max(0, newPos));
+    setCaret(el, newPos);
+    if(maxLen){ el.maxLength = maxLen; }
+  }
+
+  function setError(id, text){
+    const el = document.getElementById(id);
+    if(!el) return;
+    if(text){ el.textContent = text; el.classList.remove('hidden'); }
+    else { el.textContent = ''; el.classList.add('hidden'); }
+  }
+
+  function isValidCpfDigits(d){
+    if(!d || d.length !== 11) return false;
+    const invalid = ["00000000000","11111111111","22222222222","33333333333","44444444444","55555555555","66666666666","77777777777","88888888888","99999999999"];
+    if(invalid.indexOf(d) !== -1) return false;
+    const nums = d.split('').map(x => parseInt(x,10));
+    let sum = 0;
+    for(let i=0;i<9;i++) sum += nums[i] * (10 - i);
+    let rem = sum % 11; let first = rem < 2 ? 0 : 11 - rem; if(nums[9] !== first) return false;
+    sum = 0; for(let i=0;i<10;i++) sum += nums[i] * (11 - i);
+    rem = sum % 11; let second = rem < 2 ? 0 : 11 - rem; if(nums[10] !== second) return false;
+    return true;
+  }
+
+  function onCpfInput(e){
+    maskInput(e.target, formatCPF, 14);
+    const digits = onlyDigits(e.target.value);
+    if(digits.length === 11){
+      if(!isValidCpfDigits(digits)) setError('cpf-error', 'CPF inválido. Verifique e tente novamente.');
+      else setError('cpf-error','');
+    } else {
+      setError('cpf-error','');
+    }
+  }
+
+  function formatPhone(d){
+    d = d.slice(0,11);
+    if(d.length===0) return "";
+    if(d.length<=2) return "("+d;
+    if(d.length<=6) return "("+d.slice(0,2)+") "+d.slice(2);
+    if(d.length<=10) return "("+d.slice(0,2)+") "+d.slice(2,6)+"-"+d.slice(6);
+    return "("+d.slice(0,2)+") "+d.slice(2,7)+"-"+d.slice(7);
+  }
+  function onPhoneInput(e){ maskInput(e.target, formatPhone, 15); const digits = onlyDigits(e.target.value); if(digits.length>=10) setError('phone-error',''); else setError('phone-error','Telefone inválido. Use DDD e número válido.'); }
+
+  function updatePwdReq(valid){
+    const box = document.getElementById('pwd-req');
+    if(!box) return;
+    ['upper','lower','number','special'].forEach(k=>{
+      const row = box.querySelector('[data-req="'+k+'"]');
+      if(!row) return;
+      const ok = !!valid[k];
+      row.classList.toggle('text-green-400', ok);
+      row.classList.toggle('text-zinc-500', !ok);
+      const iconOk = row.querySelector('[data-icon="ok"]');
+      const iconNo = row.querySelector('[data-icon="no"]');
+      if(iconOk) iconOk.classList.toggle('hidden', !ok);
+      if(iconNo) iconNo.classList.toggle('hidden', ok);
+    });
+  }
+
+  function onPasswordInput(e){
+    const v = e.target.value||"";
+    updatePwdReq({
+      upper: /[A-Z]/.test(v),
+      lower: /[a-z]/.test(v),
+      number: /\d/.test(v),
+      special: /[!@#$%^&*()_+\-=[\]{}|;:',.<>?/~`]/.test(v)
+    });
+  }
+
+  function getValues(){
+    const cpf = document.getElementById('cpf-input');
+    const phone = document.getElementById('phone-input');
+    const pwd = document.getElementById('password-input');
+    return {
+      cpf: cpf ? cpf.value : "",
+      phone: phone ? phone.value : "",
+      pwd: pwd ? pwd.value : ""
+    };
+  }
+
+  function init(){
+    if(state.bound) return;
+    const cpf = document.getElementById('cpf-input');
+    const phone = document.getElementById('phone-input');
+    const pwd = document.getElementById('password-input');
+    if(cpf){ state.handlers.cpf = onCpfInput; cpf.addEventListener('input', state.handlers.cpf); maskInput(cpf, formatCPF, 14); }
+    if(phone){ state.handlers.phone = onPhoneInput; phone.addEventListener('input', state.handlers.phone); maskInput(phone, formatPhone, 15); }
+    if(pwd){ state.handlers.pwd = onPasswordInput; pwd.addEventListener('input', state.handlers.pwd); onPasswordInput({target: pwd}); }
+    state.bound = true;
+  }
+
+  function dispose(){
+    const cpf = document.getElementById('cpf-input');
+    const phone = document.getElementById('phone-input');
+    const pwd = document.getElementById('password-input');
+    if(cpf && state.handlers.cpf) cpf.removeEventListener('input', state.handlers.cpf);
+    if(phone && state.handlers.phone) phone.removeEventListener('input', state.handlers.phone);
+    if(pwd && state.handlers.pwd) pwd.removeEventListener('input', state.handlers.pwd);
+    state.bound = false;
+    state.handlers = {};
+  }
+
+  window.RegisterUI = { init, dispose, getValues };
+})();
