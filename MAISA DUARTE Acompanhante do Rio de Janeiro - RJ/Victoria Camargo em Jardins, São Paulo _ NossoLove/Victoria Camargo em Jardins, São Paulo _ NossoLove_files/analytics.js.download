@@ -1,0 +1,72 @@
+/**
+ * NossoLove - Google Analytics 4 Helper Functions
+ * Este arquivo contém funções auxiliares para rastreamento de pageviews GA4
+ * Em desenvolvimento (localhost), os eventos são logados no console.
+ */
+
+(function() {
+    'use strict';
+
+    // Verifica se estamos em ambiente de desenvolvimento
+    const isDevelopment = window.location.hostname === 'localhost' || 
+                          window.location.hostname === '127.0.0.1';
+
+    // Flag global para verificar se GA está habilitado
+    window.gaEnabled = !isDevelopment;
+
+    /**
+     * Atualiza o título do documento e (opcional) dispara um pageview com o novo título.
+     * @param {string} title - Novo título
+     * @param {boolean} track - Se true, dispara pageview (padrão: false)
+     */
+    window.setDocumentTitle = function(title, track) {
+        try {
+            if (!title) return;
+            document.title = title;
+            if (track) {
+                if (typeof window.trackPageView === 'function') {
+                    window.trackPageView(window.location.pathname, title);
+                }
+            }
+        } catch (e) {
+            console && console.warn && console.warn('setDocumentTitle error', e);
+        }
+    };
+
+    /**
+     * Envia um pageview para o GA4
+     * @param {string} path - Caminho da página (ex: "/profile/joana")
+     * @param {string} title - Título da página
+     */
+    window.trackPageView = window.trackPageView || function(path, title) {
+        const pagePath = path || window.location.pathname;
+        const pageTitle = title || document.title;
+
+        if (isDevelopment) {
+            console.log('%c[GA4 DEV] Page View', 'color: #4CAF50; font-weight: bold;', {
+                page_path: pagePath,
+                page_title: pageTitle,
+                page_location: window.location.href
+            });
+            return;
+        }
+
+        if (window.dataLayer && window.gaEnabled) {
+            window.dataLayer.push({
+                event: 'page_view',
+                page_path: pagePath,
+                page_title: pageTitle,
+                page_location: window.location.href
+            });
+        }
+    };
+
+    // Log inicial informando o estado do GA
+    if (isDevelopment) {
+        console.log('%c[GA4] Modo Desenvolvimento - Estatísticas NÃO serão enviadas ao Google Analytics', 
+                    'color: #FF9800; font-weight: bold; font-size: 12px;');
+        console.log('%c[GA4] Os pageviews serão logados no console para debug.', 
+                    'color: #9E9E9E;');
+    }
+
+})();

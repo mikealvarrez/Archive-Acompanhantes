@@ -1,0 +1,27 @@
+/**
+ * Botão flutuante WhatsApp: aparece quando o botão principal "Conversar comigo" sai da tela.
+ * Suporta re-inicialização ao navegar entre perfis (desconecta observer anterior).
+ */
+window.initWhatsAppFloat = function () {
+    if (window._whatsappFloatObserver) {
+        window._whatsappFloatObserver.disconnect();
+        window._whatsappFloatObserver = null;
+    }
+    function setup() {
+        var main = document.getElementById('whatsapp-main-btn');
+        var float = document.getElementById('whatsapp-float-btn');
+        if (!main || !float) return;
+        var observer = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+                float.classList.toggle('whatsapp-float-hidden', e.isIntersecting);
+            });
+        }, { threshold: 0, rootMargin: '-15% 0px 0px 0px', root: null });
+        observer.observe(main);
+        window._whatsappFloatObserver = observer;
+    }
+    if (document.readyState === 'complete') {
+        requestAnimationFrame(function () { setTimeout(setup, 50); });
+    } else {
+        window.addEventListener('load', function () { requestAnimationFrame(function () { setTimeout(setup, 50); }); }, { once: true });
+    }
+};

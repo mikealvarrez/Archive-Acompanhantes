@@ -1,0 +1,242 @@
+// Lazy Loading com Intersection Observer otimizado
+(function() {
+    'use strict';
+
+    // Configuração do Intersection Observer
+    const imageObserverOptions = {
+        root: null,
+        rootMargin: '50px 0px', // Carregar 50px antes de entrar na viewport
+        threshold: 0.01
+    };
+
+    // Cache de imagens já carregadas
+    const loadedImages = new Set();
+
+    // Observer para imagens
+    const imageObserver = new IntersectionObserver((entries, observer) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                const img = entry.target;
+
+                // Skip if already loaded
+                if (loadedImages.has(img.src)) {
+                    observer.unobserve(img);
+                    return;
+                }
+
+                // Load image
+                if (img.dataset.src && !img.src.includes(img.dataset.src)) {
+                    // Add loading class
+                    img.classList.add('loading');
+
+                    // Create new image to preload
+                    const tempImg = new Image();
+
+                    tempImg.onload = () => {
+                        img.src = img.dataset.src;
+                        img.classList.remove('lazy', 'loading');
+                        img.classList.add('loaded');
+                        loadedImages.add(img.src);
+
+                        // Fade in effect
+                        requestAnimationFrame(() => {
+                            img.style.opacity = '1';
+                        });
+                    };
+
+                    tempImg.onerror = () => {
+                        img.classList.remove('loading');
+                        img.classList.add('error');
+                        // Use placeholder on error
+                        img.src = '/images/default-avatar.png';
+                    };
+
+                    tempImg.src = img.dataset.src;
+                    observer.unobserve(img);
+                }
+            }
+        });
+    }, imageObserverOptions);
+
+    // Infinite Scroll Handler
+    let isLoadingMore = false;
+    let hasMoreContent = true;
+    let currentPage = 1;
+
+    const infiniteScrollObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting && !isLoadingMore && hasMoreContent) {
+                const loadMoreButton = entry.target;
+
+                // Check if it's a button or sentinel element
+                if (loadMoreButton && loadMoreButton.click) {
+                    // Auto-click load more button when it comes into view
+                    loadMoreButton.click();
+                }
+            }
+        });
+    }, {
+        root: null,
+        rootMargin: '100px',
+        threshold: 0.1
+    });
+
+    // Initialize lazy loading
+    function initLazyLoading() {
+        // Find all lazy images
+        const lazyImages = document.querySelectorAll('img.lazy, img[data-src]');
+        lazyImages.forEach(img => {
+            // Set initial styles
+            if (!img.style.opacity) {
+                img.style.opacity = '0';
+                img.style.transition = 'opacity 0.3s ease-in-out';
+            }
+            imageObserver.observe(img);
+        });
+
+        // Find load more button for infinite scroll
+        const loadMoreButton = document.querySelector('[data-infinite-scroll], .load-more-button');
+        if (loadMoreButton) {
+            infiniteScrollObserver.observe(loadMoreButton);
+        }
+    }
+
+    // Optimize image loading based on connection
+    function optimizeForConnection() {
+        if ('connection' in navigator) {
+            const connection = navigator.connection;
+
+            // Adjust loading strategy based on connection
+            if (connection.saveData || connection.effectiveType === 'slow-2g' || connection.effectiveType === '2g') {
+                // Load fewer images on slow connections
+                imageObserverOptions.rootMargin = '10px 0px';
+                console.log('Optimizing for slow connection');
+            } else if (connection.effectiveType === '4g') {
+                // Preload more on fast connections
+                imageObserverOptions.rootMargin = '200px 0px';
+                console.log('Optimizing for fast connection');
+            }
+        }
+    }
+
+    // Debounce function for scroll events
+    function debounce(func, wait) {
+        let timeout;
+        return function executedFunction(...args) {
+            const later = () => {
+                clearTimeout(timeout);
+                func(...args);
+            };
+            clearTimeout(timeout);
+            timeout = setTimeout(later, wait);
+        };
+    }
+
+    // Virtual scrolling helper for very long lists
+    function enableVirtualScrolling(container, itemHeight) {
+        if (!container) return;
+
+        const visibleHeight = container.clientHeight;
+        const totalItems = container.children.length;
+        const totalHeight = totalItems * itemHeight;
+
+        // Create spacer elements
+        const topSpacer = document.createElement('div');
+        const bottomSpacer = document.createElement('div');
+
+        container.insertBefore(topSpacer, container.firstChild);
+        container.appendChild(bottomSpacer);
+
+        const updateVirtualScroll = debounce(() => {
+            const scrollTop = container.scrollTop;
+            const startIndex = Math.floor(scrollTop / itemHeight);
+            const endIndex = Math.ceil((scrollTop + visibleHeight) / itemHeight);
+
+            // Update spacers and visible items
+            topSpacer.style.height = `${startIndex * itemHeight}px`;
+            bottomSpacer.style.height = `${(totalItems - endIndex) * itemHeight}px`;
+
+            // Show/hide items based on viewport
+            Array.from(container.children).forEach((child, index) => {
+                if (child === topSpacer || child === bottomSpacer) return;
+
+                if (index >= startIndex && index <= endIndex) {
+                    child.style.display = '';
+                } else {
+                    child.style.display = 'none';
+                }
+            });
+        }, 10);
+
+        container.addEventListener('scroll', updateVirtualScroll);
+        updateVirtualScroll();
+    }
+
+    // Preload critical images
+    function preloadCriticalImages() {
+        const criticalImages = document.querySelectorAll('[data-critical]');
+        criticalImages.forEach(img => {
+            if (img.dataset.src) {
+                img.src = img.dataset.src;
+                delete img.dataset.src;
+                img.classList.remove('lazy');
+            }
+        });
+    }
+
+    // Progressive image loading (low quality to high quality)
+    function setupProgressiveImages() {
+        const progressiveImages = document.querySelectorAll('[data-lowsrc]');
+
+        progressiveImages.forEach(img => {
+            // Load low quality first
+            if (img.dataset.lowsrc) {
+                img.src = img.dataset.lowsrc;
+
+                // Then load high quality
+                const highQualityImg = new Image();
+                highQualityImg.onload = () => {
+                    img.src = highQualityImg.src;
+                    img.classList.add('high-quality-loaded');
+                };
+                highQualityImg.src = img.dataset.src;
+            }
+        });
+    }
+
+    // Initialize everything
+    function initialize() {
+        optimizeForConnection();
+        preloadCriticalImages();
+        setupProgressiveImages();
+        initLazyLoading();
+
+        // Re-initialize on dynamic content load
+        document.addEventListener('blazor:afterStartup', initLazyLoading);
+
+        // Re-scan for new images periodically
+        setInterval(() => {
+            const newImages = document.querySelectorAll('img.lazy:not(.observed)');
+            if (newImages.length > 0) {
+                newImages.forEach(img => {
+                    img.classList.add('observed');
+                    imageObserver.observe(img);
+                });
+            }
+        }, 1000);
+    }
+
+    // Start when DOM is ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initialize);
+    } else {
+        initialize();
+    }
+
+    // Export for global use
+    window.ListOptimization = {
+        initLazyLoading,
+        enableVirtualScrolling,
+        preloadCriticalImages
+    };
+})();

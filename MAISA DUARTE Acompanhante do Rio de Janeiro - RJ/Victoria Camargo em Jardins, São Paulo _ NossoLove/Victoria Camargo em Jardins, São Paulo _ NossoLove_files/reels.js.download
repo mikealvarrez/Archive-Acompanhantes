@@ -1,0 +1,894 @@
+// Reels - Swipe navigation for photos and videos (global script, no ES module import needed)
+(function() {
+    var dotnetHelper = null;
+    var items = [];
+    var currentIndex = 0;
+    var config = { isVideo: false, baseUrl: '' };
+
+    // Drag state
+    var activePointer = null;
+    var startY = 0;
+    var startTime = 0;
+    var isDragging = false;
+    var isAnimating = false;
+    var sceneHeight = 0;
+
+    // DOM elements cache
+    var mediaPrev, mediaCurrent, mediaNext, mediaBgBlur;
+    var scenePrev, sceneCurrent, sceneNext;
+
+    // Image prefetch cache
+    var prefetchCache = {};
+    var isMobile = window.innerWidth < 1024;
+
+    function getCurrentItem() {
+        if (!items || items.length === 0) return null;
+        var len = items.length;
+        return items[(currentIndex % len + len) % len];
+    }
+
+    function getItem(index) {
+        if (!items || items.length === 0) return null;
+        var len = items.length;
+        return items[(index % len + len) % len];
+    }
+
+    function cacheElements() {
+        mediaPrev = document.getElementById('media-prev');
+        mediaCurrent = document.getElementById('media-current');
+        mediaNext = document.getElementById('media-next');
+        mediaBgBlur = document.getElementById('media-bg-blur');
+        scenePrev = document.getElementById('scene-prev');
+        sceneCurrent = document.getElementById('scene-current');
+        sceneNext = document.getElementById('scene-next');
+    }
+
+    function prefetchAhead(fromIndex) {
+        if (config.isVideo || !items || items.length <= 3) return;
+        for (var offset = 2; offset <= 3; offset++) {
+            var item = getItem(fromIndex + offset);
+            if (item && item.mediaPath && !prefetchCache[item.mediaPath]) {
+                var img = new Image();
+                img.src = item.mediaPath;
+                prefetchCache[item.mediaPath] = img;
+            }
+        }
+        var prevItem = getItem(fromIndex - 2);
+        if (prevItem && prevItem.mediaPath && !prefetchCache[prevItem.mediaPath]) {
+            var img = new Image();
+            img.src = prevItem.mediaPath;
+            prefetchCache[prevItem.mediaPath] = img;
+        }
+    }
+
+    function loadMedia(element, src, isCurrent) {
+        if (!element || !src) return;
+
+        if (config.isVideo) {
+            // Preload 'auto' também nos vizinhos (prev/next) pra evitar o "carrega de novo"
+            // quando a cena vizinha vira current após o swipe — os bytes já estão bufferizados.
+            var desiredPreload = 'auto';
+            var srcChanged = element.src !== src;
+
+            if (srcChanged || element.preload !== desiredPreload) {
+                element.preload = desiredPreload;
+            }
+            if (srcChanged) {
+                element.src = src;
+                element.load();
+            }
+            if (!isCurrent) {
+                try {
+                    element.muted = true;
+                    element.pause();
+                } catch (e) {}
+            }
+        } else {
+            if (element.getAttribute('src') !== src) {
+                element.src = src;
+            }
+        }
+    }
+
+    function playVideo(element) {
+        if (!config.isVideo || !element) return;
+        try {
+            element.preload = 'auto';
+            element.muted = false;
+            element.play().catch(function() {
+                element.muted = true;
+                element.play().catch(function() {});
+            });
+        } catch (e) {}
+    }
+
+    function pauseVideo(element) {
+        if (!config.isVideo || !element) return;
+        try {
+            element.pause();
+            // NÃO rebobinar (currentTime=0) — fazia o vídeo que tá saindo "reiniciar"
+            // durante a animação de swipe, dando a impressão que o story anterior voltava
+            // a tocar do começo antes do novo aparecer. Deixar congelado na última frame
+            // onde o usuário parou fica bem mais fluido.
+        } catch (e) {}
+    }
+
+    // Usado quando queremos explicitamente voltar um vídeo ao começo (ex: quando ele deixa
+    // de ser vizinho e vai ser reutilizado pra carregar outra mídia).
+    function rewindAndPauseVideo(element) {
+        if (!config.isVideo || !element) return;
+        try {
+            element.pause();
+            element.currentTime = 0;
+        } catch (e) {}
+    }
+
+    function silenceNonCurrentVideos() {
+        if (!config.isVideo) return;
+        [mediaPrev, mediaNext, mediaBgBlur].forEach(function(el) {
+            if (!el) return;
+            try {
+                el.muted = true;
+                el.pause();
+            } catch (e) {}
+        });
+    }
+
+    function notifyIndexChange() {
+        try { window.__reelsCurrentIndex = currentIndex; } catch (e) {}
+        if (dotnetHelper) {
+            try {
+                dotnetHelper.invokeMethodAsync('UpdateCurrentIndexAsync', currentIndex);
+            } catch (e) {}
+        }
+    }
+
+    function formatCount(n) {
+        n = Number(n) || 0;
+        if (n < 1000) return String(n);
+        if (n < 1000000) {
+            var k = n / 1000;
+            var r = Math.round(k * 10) / 10;
+            return (r % 1 === 0 ? r.toFixed(0) : r.toFixed(1)) + 'k';
+        }
+        var m = n / 1000000;
+        var rm = Math.round(m * 10) / 10;
+        return (rm % 1 === 0 ? rm.toFixed(0) : rm.toFixed(1)) + 'M';
+    }
+
+    function setLikeButtonState(btn, liked) {
+        if (!btn) return;
+        if (liked) btn.classList.add('is-liked');
+        else btn.classList.remove('is-liked');
+        var filled = btn.querySelector('.filled-heart');
+        var empty = btn.querySelector('.empty-heart');
+        if (filled) filled.classList.toggle('hidden', !liked);
+        if (empty) empty.classList.toggle('hidden', liked);
+    }
+
+    // Atualiza counts + estado de like nas 3 cenas — usado após clique pra propagar
+    // a mudança otimista em todas que pertencem ao mesmo owner.
+    function refreshAllRailVisuals() {
+        var scenes = [scenePrev, sceneCurrent, sceneNext];
+        var indices = [currentIndex - 1, currentIndex, currentIndex + 1];
+        scenes.forEach(function(scene, i) {
+            if (!scene) return;
+            var it = getItem(indices[i]);
+            if (!it) return;
+            var lc = scene.querySelector('span[id^="like-count-"]');
+            if (lc) lc.textContent = formatCount(it.likeCount);
+            var sc = scene.querySelector('span[id^="share-count-"]');
+            if (sc) sc.textContent = formatCount(it.shareCount);
+            var lb = scene.querySelector('button[id^="btn-like-"]');
+            if (lb) setLikeButtonState(lb, !!it.isLiked);
+        });
+    }
+
+    function updateOverlay(scene, item) {
+        if (!scene || !item) return;
+
+        // Avatar oculto (retrocompatibilidade) — seletor específico pra não pegar o rail
+        var avatarHidden = scene.querySelector('img[id^="avatar-"].hidden');
+        if (avatarHidden) avatarHidden.src = item.avatar || '/images/default-avatar.png';
+
+        // Nome — seletor span específico pra não pegar o div externo name-block-*
+        var name = scene.querySelector('span[id^="name-"]');
+        if (name) name.textContent = item.name || item.username;
+
+        var nameBtn = scene.querySelector('button[id^="name-btn-"]');
+        if (nameBtn) nameBtn.onclick = function() {
+            if (dotnetHelper) dotnetHelper.invokeMethodAsync('GoToProfileFromJS', item.username);
+        };
+
+        var nameBlock = scene.querySelector('div[id^="name-block-"]');
+        if (nameBlock) {
+            if (item.name || item.username) nameBlock.classList.remove('opacity-0');
+            else nameBlock.classList.add('opacity-0');
+        }
+
+        // Rail lateral (por-cena) — avatar, like, share, WhatsApp, arrows, close
+        var railAvatar = scene.querySelector('img[id^="avatar-rail-"]');
+        if (railAvatar) railAvatar.src = item.avatar || '/images/default-avatar.png';
+
+        var avatarBtn = scene.querySelector('button[id^="btn-avatar-"]');
+        if (avatarBtn) avatarBtn.onclick = function() {
+            if (dotnetHelper) dotnetHelper.invokeMethodAsync('GoToProfileFromJS', item.username);
+        };
+
+        // Like
+        var likeBtn = scene.querySelector('button[id^="btn-like-"]');
+        var likeCountEl = scene.querySelector('span[id^="like-count-"]');
+        if (likeBtn) {
+            setLikeButtonState(likeBtn, !!item.isLiked);
+            likeBtn.onclick = function() {
+                var newLiked = !likeBtn.classList.contains('is-liked');
+                // Otimista: propaga em todos os itens do mesmo owner (pra bater com contador unificado)
+                var delta = newLiked ? 1 : -1;
+                items.forEach(function(it) {
+                    if (it.accountId === item.accountId) {
+                        it.isLiked = newLiked;
+                        var c = Number(it.likeCount) || 0;
+                        it.likeCount = Math.max(0, c + delta);
+                    }
+                });
+                refreshAllRailVisuals();
+                try { window.__reelsLikeBurst(newLiked); } catch (e) {}
+                if (dotnetHelper) {
+                    dotnetHelper.invokeMethodAsync('LikeItemFromJS', item.accountId, item.mediaPath)
+                        .catch(function() {
+                            // Reverte em caso de erro de rede
+                            items.forEach(function(it) {
+                                if (it.accountId === item.accountId) {
+                                    it.isLiked = !newLiked;
+                                    var c = Number(it.likeCount) || 0;
+                                    it.likeCount = Math.max(0, c - delta);
+                                }
+                            });
+                            refreshAllRailVisuals();
+                        });
+                }
+            };
+        }
+        if (likeCountEl) likeCountEl.textContent = formatCount(item.likeCount);
+
+        // Share
+        var shareBtn = scene.querySelector('button[id^="btn-share-"]');
+        var shareCountEl = scene.querySelector('span[id^="share-count-"]');
+        if (shareBtn) shareBtn.onclick = function() {
+            if (dotnetHelper) dotnetHelper.invokeMethodAsync('ShareItemFromJS', item.accountId, item.mediaPath);
+        };
+        if (shareCountEl) shareCountEl.textContent = formatCount(item.shareCount);
+
+        // WhatsApp
+        var waBtn = scene.querySelector('button[id^="btn-whatsapp-"]');
+        if (waBtn) waBtn.onclick = function() {
+            if (dotnetHelper) dotnetHelper.invokeMethodAsync('OpenWhatsAppFromJS', item.username);
+        };
+
+        // Arrows (swipe) e close — puramente JS, sem roundtrip Blazor
+        var arrowUp = scene.querySelector('button[id^="btn-arrow-up-"]');
+        if (arrowUp) arrowUp.onclick = function() { if (window.__reelsSwipePrev) window.__reelsSwipePrev(); };
+        var arrowDown = scene.querySelector('button[id^="btn-arrow-down-"]');
+        if (arrowDown) arrowDown.onclick = function() { if (window.__reelsSwipeNext) window.__reelsSwipeNext(); };
+        var closeBtn = scene.querySelector('button[id^="btn-close-"]');
+        if (closeBtn) closeBtn.onclick = function() { if (window.__reelsGoBack) window.__reelsGoBack(); };
+    }
+
+    function setupThreeScenes() {
+        if (!items || items.length === 0) return;
+
+        var prevItem = getItem(currentIndex - 1);
+        var currentItem = getItem(currentIndex);
+        var nextItem = getItem(currentIndex + 1);
+
+        if (prevItem && mediaPrev) loadMedia(mediaPrev, prevItem.mediaPath, false);
+        if (currentItem) {
+            if (mediaCurrent) loadMedia(mediaCurrent, currentItem.mediaPath, true);
+            if (mediaBgBlur && !isMobile) loadMedia(mediaBgBlur, currentItem.mediaPath, false);
+            if (config.isVideo) {
+                playVideo(mediaCurrent);
+                silenceNonCurrentVideos();
+            }
+        }
+        if (nextItem && mediaNext) loadMedia(mediaNext, nextItem.mediaPath, false);
+
+        updateOverlay(scenePrev, prevItem);
+        updateOverlay(sceneCurrent, currentItem);
+        updateOverlay(sceneNext, nextItem);
+
+        prefetchAhead(currentIndex);
+
+        if (scenePrev) {
+            scenePrev.style.transition = 'none';
+            scenePrev.style.transform = 'translateY(-100%)';
+            scenePrev.style.zIndex = '5';
+            scenePrev.style.pointerEvents = 'none';
+        }
+        if (sceneCurrent) {
+            sceneCurrent.style.transition = 'none';
+            sceneCurrent.style.transform = 'translateY(0)';
+            sceneCurrent.style.zIndex = '20';
+            sceneCurrent.style.pointerEvents = 'auto';
+        }
+        if (sceneNext) {
+            sceneNext.style.transition = 'none';
+            sceneNext.style.transform = 'translateY(100%)';
+            sceneNext.style.zIndex = '5';
+            sceneNext.style.pointerEvents = 'none';
+        }
+
+        updateUrl();
+    }
+
+    function updateUrl() {
+        try { window.__reelsCurrentIndex = currentIndex; } catch (e) {}
+        var item = getCurrentItem();
+        var url;
+
+        if (item) {
+            if (config.isExclusive) {
+                url = (config.isVideo ? '/reels/exclusive-videos/' : '/reels/exclusive/') + item.username + '/' + currentIndex;
+            } else if (config.isVideo) {
+                if (config.isProfileSpecific) {
+                    url = '/stories/' + item.username + '/' + currentIndex;
+                } else {
+                    url = '/stories/' + item.username;
+                }
+            } else {
+                url = '/profile/' + item.username + '/feed/' + currentIndex;
+            }
+        } else {
+            url = config.baseUrl + '/' + currentIndex;
+        }
+
+        try {
+            history.replaceState({}, '', url);
+        } catch (e) {}
+    }
+
+    function beginDrag(clientY) {
+        if (isAnimating) return;
+        startY = clientY;
+        startTime = Date.now();
+        isDragging = false;
+        sceneHeight = sceneCurrent ? sceneCurrent.getBoundingClientRect().height : window.innerHeight;
+    }
+
+    function moveDrag(clientY) {
+        if (activePointer === null || isAnimating) return;
+
+        var deltaY = clientY - startY;
+        var absY = Math.abs(deltaY);
+
+        if (!isDragging && absY > 5) isDragging = true;
+        if (!isDragging) return;
+
+        if (sceneCurrent) {
+            sceneCurrent.style.transition = 'none';
+            sceneCurrent.style.transform = 'translateY(' + deltaY + 'px)';
+        }
+
+        if (deltaY < 0) {
+            if (sceneNext) {
+                sceneNext.style.transition = 'none';
+                sceneNext.style.zIndex = '20';
+                sceneNext.style.transform = 'translateY(' + (sceneHeight + deltaY) + 'px)';
+            }
+            if (scenePrev) scenePrev.style.zIndex = '5';
+        } else if (deltaY > 0) {
+            if (scenePrev) {
+                scenePrev.style.transition = 'none';
+                scenePrev.style.zIndex = '20';
+                scenePrev.style.transform = 'translateY(' + (-sceneHeight + deltaY) + 'px)';
+            }
+            if (sceneNext) sceneNext.style.zIndex = '5';
+        }
+    }
+
+    function endDrag(clientY) {
+        if (activePointer === null || isAnimating) return;
+
+        var deltaY = clientY - startY;
+        var deltaTime = Math.max(1, Date.now() - startTime);
+        var velocity = Math.abs(deltaY) / deltaTime;
+
+        var acceptDistance = sceneHeight * 0.20;
+        var acceptVelocity = 0.35;
+
+        var shouldGoNext = isDragging && deltaY < 0 && (Math.abs(deltaY) > acceptDistance || velocity > acceptVelocity);
+        var shouldGoPrev = isDragging && deltaY > 0 && (Math.abs(deltaY) > acceptDistance || velocity > acceptVelocity);
+
+        var duration = 280;
+
+        if (shouldGoNext && items.length > 0) {
+            isAnimating = true;
+            if (config.isVideo) {
+                pauseVideo(mediaCurrent);
+                // Pré-seek do vídeo que tá entrando: frame 0 antes de aparecer — evita ver um
+                // frame aleatório do buffer do vizinho durante a animação de slide-in.
+                try { if (mediaNext) mediaNext.currentTime = 0; } catch (e) {}
+            }
+
+            if (sceneCurrent) {
+                sceneCurrent.style.transition = 'transform ' + duration + 'ms ease';
+                sceneCurrent.style.transform = 'translateY(' + (-sceneHeight) + 'px)';
+            }
+            if (sceneNext) {
+                sceneNext.style.transition = 'transform ' + duration + 'ms ease';
+                sceneNext.style.transform = 'translateY(0)';
+            }
+
+            setTimeout(function() {
+                currentIndex = (currentIndex + 1) % items.length;
+                rotateAfterNext();
+                cleanupDrag();
+                notifyIndexChange();
+            }, duration + 20);
+            return;
+        }
+
+        if (shouldGoPrev && items.length > 0) {
+            isAnimating = true;
+            if (config.isVideo) {
+                pauseVideo(mediaCurrent);
+                try { if (mediaPrev) mediaPrev.currentTime = 0; } catch (e) {}
+            }
+
+            if (sceneCurrent) {
+                sceneCurrent.style.transition = 'transform ' + duration + 'ms ease';
+                sceneCurrent.style.transform = 'translateY(' + sceneHeight + 'px)';
+            }
+            if (scenePrev) {
+                scenePrev.style.transition = 'transform ' + duration + 'ms ease';
+                scenePrev.style.transform = 'translateY(0)';
+            }
+
+            setTimeout(function() {
+                currentIndex = (currentIndex - 1 + items.length) % items.length;
+                rotateAfterPrev();
+                cleanupDrag();
+                notifyIndexChange();
+            }, duration + 20);
+            return;
+        }
+
+        revertPositions();
+        cleanupDrag();
+    }
+
+    function rotateAfterNext() {
+        var tempScene = scenePrev;
+        var tempMedia = mediaPrev;
+
+        scenePrev = sceneCurrent;
+        mediaPrev = mediaCurrent;
+
+        sceneCurrent = sceneNext;
+        mediaCurrent = mediaNext;
+
+        sceneNext = tempScene;
+        mediaNext = tempMedia;
+
+        resetScenePositions();
+
+        var nextItem = getItem(currentIndex + 1);
+        if (nextItem && sceneNext) {
+            loadMedia(mediaNext, nextItem.mediaPath, false);
+            updateOverlay(sceneNext, nextItem);
+        }
+
+        var currentItem = getItem(currentIndex);
+        if (currentItem) {
+            if (mediaBgBlur && !isMobile) loadMedia(mediaBgBlur, currentItem.mediaPath, false);
+            if (config.isVideo) {
+                // Garante que o novo current comece do frame 0 (antes podia estar em qualquer
+                // posição se o vizinho buffered com preload=auto mexeu no currentTime).
+                try { mediaCurrent.currentTime = 0; } catch (e) {}
+                playVideo(mediaCurrent);
+                silenceNonCurrentVideos();
+            }
+            }
+
+        prefetchAhead(currentIndex);
+        updateUrl();
+    }
+
+    function rotateAfterPrev() {
+        var tempScene = sceneNext;
+        var tempMedia = mediaNext;
+
+        sceneNext = sceneCurrent;
+        mediaNext = mediaCurrent;
+
+        sceneCurrent = scenePrev;
+        mediaCurrent = mediaPrev;
+
+        scenePrev = tempScene;
+        mediaPrev = tempMedia;
+
+        resetScenePositions();
+
+        var prevItem = getItem(currentIndex - 1);
+        if (prevItem && scenePrev) {
+            loadMedia(mediaPrev, prevItem.mediaPath, false);
+            updateOverlay(scenePrev, prevItem);
+        }
+
+        var currentItem = getItem(currentIndex);
+        if (currentItem) {
+            if (mediaBgBlur && !isMobile) loadMedia(mediaBgBlur, currentItem.mediaPath, false);
+            if (config.isVideo) {
+                try { mediaCurrent.currentTime = 0; } catch (e) {}
+                playVideo(mediaCurrent);
+                silenceNonCurrentVideos();
+            }
+            }
+
+        prefetchAhead(currentIndex);
+        updateUrl();
+    }
+
+    function resetScenePositions() {
+        if (scenePrev) {
+            scenePrev.style.transition = 'none';
+            scenePrev.style.transform = 'translateY(-100%)';
+            scenePrev.style.zIndex = '5';
+            scenePrev.style.pointerEvents = 'none';
+        }
+        if (sceneCurrent) {
+            sceneCurrent.style.transition = 'none';
+            sceneCurrent.style.transform = 'translateY(0)';
+            sceneCurrent.style.zIndex = '20';
+            sceneCurrent.style.pointerEvents = 'auto';
+        }
+        if (sceneNext) {
+            sceneNext.style.transition = 'none';
+            sceneNext.style.transform = 'translateY(100%)';
+            sceneNext.style.zIndex = '5';
+            sceneNext.style.pointerEvents = 'none';
+        }
+    }
+
+    function revertPositions() {
+        var duration = 200;
+
+        if (sceneCurrent) {
+            sceneCurrent.style.transition = 'transform ' + duration + 'ms ease';
+            sceneCurrent.style.transform = 'translateY(0)';
+        }
+        if (scenePrev) {
+            scenePrev.style.transition = 'transform ' + duration + 'ms ease';
+            scenePrev.style.transform = 'translateY(-100%)';
+            scenePrev.style.zIndex = '5';
+        }
+        if (sceneNext) {
+            sceneNext.style.transition = 'transform ' + duration + 'ms ease';
+            sceneNext.style.transform = 'translateY(100%)';
+            sceneNext.style.zIndex = '5';
+        }
+    }
+
+    function cleanupDrag() {
+        activePointer = null;
+        isDragging = false;
+        isAnimating = false;
+    }
+
+    // ---- Pinch to zoom (só em fotos, não em vídeo) ----
+    var isPinching = false;
+    var pinchStartDist = 0;
+    var pinchStartMid = { x: 0, y: 0 };
+    function getPinchDist(touches) {
+        var dx = touches[0].clientX - touches[1].clientX;
+        var dy = touches[0].clientY - touches[1].clientY;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+    function getPinchMid(touches, rect) {
+        var cx = (touches[0].clientX + touches[1].clientX) / 2;
+        var cy = (touches[0].clientY + touches[1].clientY) / 2;
+        return { x: cx - rect.left, y: cy - rect.top };
+    }
+    function applyPinch(touches) {
+        if (!mediaCurrent) return;
+        var rect = mediaCurrent.getBoundingClientRect();
+        var dist = getPinchDist(touches);
+        var scale = Math.max(1, Math.min(4, dist / pinchStartDist));
+        // Origem de transformação no ponto médio inicial pra zoom parecer natural
+        mediaCurrent.style.transformOrigin = pinchStartMid.x + 'px ' + pinchStartMid.y + 'px';
+        mediaCurrent.style.transition = 'none';
+        mediaCurrent.style.transform = 'scale(' + scale + ')';
+    }
+    function endPinch() {
+        if (!isPinching) return;
+        isPinching = false;
+        if (mediaCurrent) {
+            mediaCurrent.style.transition = 'transform 220ms cubic-bezier(.2,.8,.2,1)';
+            mediaCurrent.style.transform = 'scale(1)';
+            // Depois da transição, limpa inline pra não sujar o CSS
+            setTimeout(function() {
+                if (mediaCurrent) {
+                    mediaCurrent.style.transition = '';
+                    mediaCurrent.style.transform = '';
+                    mediaCurrent.style.transformOrigin = '';
+                }
+            }, 240);
+        }
+    }
+
+    function attachListeners() {
+        var wrapper = document.getElementById('scene-wrapper');
+        if (!wrapper) return;
+
+        var opts = { passive: false };
+
+        var onDown = function(ev) {
+            if (isAnimating) return;
+
+            var target = ev.target;
+            if (target && target.closest && target.closest('button, a, input, [data-reels-ignore]')) return;
+
+            if (ev.pointerId !== undefined) {
+                activePointer = ev.pointerId;
+                try { ev.target.setPointerCapture(ev.pointerId); } catch (e) {}
+            } else if (ev.touches && ev.touches.length) {
+                activePointer = 'touch';
+            } else {
+                activePointer = 'mouse';
+            }
+
+            var clientY = (ev.touches && ev.touches.length) ? ev.touches[0].clientY : ev.clientY;
+            beginDrag(clientY);
+            ev.preventDefault();
+        };
+
+        var onMove = function(ev) {
+            if (isPinching) return; // pinch domina
+            if (activePointer === null) return;
+            if (ev.pointerId !== undefined && ev.pointerId !== activePointer) return;
+
+            var clientY = (ev.touches && ev.touches.length) ? ev.touches[0].clientY : ev.clientY;
+            moveDrag(clientY);
+            ev.preventDefault();
+        };
+
+        var onUp = function(ev) {
+            if (activePointer === null) return;
+            if (ev.pointerId !== undefined && ev.pointerId !== activePointer) return;
+
+            try { if (ev.pointerId !== undefined) ev.target.releasePointerCapture(ev.pointerId); } catch (e) {}
+
+            var clientY = (ev.changedTouches && ev.changedTouches.length) ? ev.changedTouches[0].clientY : ev.clientY;
+            endDrag(clientY);
+            ev.preventDefault();
+        };
+
+        // Listeners de touch dedicados pra pinch-to-zoom
+        var onTouchStart = function(ev) {
+            if (ev.touches && ev.touches.length === 2 && !config.isVideo && mediaCurrent) {
+                isPinching = true;
+                pinchStartDist = getPinchDist(ev.touches);
+                var rect = mediaCurrent.getBoundingClientRect();
+                pinchStartMid = getPinchMid(ev.touches, rect);
+                // Cancela qualquer drag em andamento
+                if (sceneCurrent) {
+                    sceneCurrent.style.transition = 'transform 180ms ease';
+                    sceneCurrent.style.transform = 'translateY(0)';
+                }
+                activePointer = null;
+                isDragging = false;
+                ev.preventDefault();
+                return;
+            }
+            onDown(ev);
+        };
+        var onTouchMove = function(ev) {
+            if (isPinching && ev.touches && ev.touches.length === 2) {
+                applyPinch(ev.touches);
+                ev.preventDefault();
+                return;
+            }
+            onMove(ev);
+        };
+        var onTouchEnd = function(ev) {
+            if (isPinching) {
+                // Quando sobra <2 dedos, reseta
+                if (!ev.touches || ev.touches.length < 2) {
+                    endPinch();
+                    ev.preventDefault();
+                    return;
+                }
+            }
+            onUp(ev);
+        };
+
+        wrapper.style.touchAction = 'none';
+        wrapper.addEventListener('pointerdown', onDown, opts);
+        wrapper.addEventListener('pointermove', onMove, opts);
+        wrapper.addEventListener('pointerup', onUp, opts);
+        wrapper.addEventListener('pointercancel', onUp, opts);
+        wrapper.addEventListener('touchstart', onTouchStart, opts);
+        wrapper.addEventListener('touchmove', onTouchMove, opts);
+        wrapper.addEventListener('touchend', onTouchEnd, opts);
+        wrapper.addEventListener('touchcancel', onTouchEnd, opts);
+
+        window.addEventListener('mousemove', onMove, opts);
+        window.addEventListener('mouseup', onUp, opts);
+    }
+
+    // Global API exposed to Blazor
+    window.__reelsInit = function(dotnetRef, itemsData, startIndex, configData) {
+        dotnetHelper = dotnetRef;
+        items = itemsData || [];
+        currentIndex = startIndex || 0;
+        config = configData || { isVideo: false, baseUrl: '' };
+        prefetchCache = {};
+        isMobile = window.innerWidth < 1024;
+        try { window.__reelsCurrentIndex = currentIndex; } catch (e) {}
+
+        function tryInit(attempt) {
+            cacheElements();
+            if (!sceneCurrent && attempt < 10) {
+                setTimeout(function() { tryInit(attempt + 1); }, 50);
+                return;
+            }
+            attachListeners();
+            setupThreeScenes();
+        }
+        setTimeout(function() { tryInit(0); }, 50);
+    };
+
+    window.__reelsGetCurrentIndex = function() {
+        return currentIndex;
+    };
+
+    window.__reelsGetCurrentUrl = function() {
+        return window.location.href;
+    };
+
+    window.__reelsSwipeNext = function() {
+        if (isAnimating || !items || items.length === 0) return;
+
+        var duration = 280;
+        sceneHeight = sceneCurrent ? sceneCurrent.getBoundingClientRect().height : window.innerHeight;
+        isAnimating = true;
+        if (config.isVideo) {
+            pauseVideo(mediaCurrent);
+            try { if (mediaNext) mediaNext.currentTime = 0; } catch (e) {}
+        }
+
+        if (sceneNext) {
+            sceneNext.style.transition = 'none';
+            sceneNext.style.zIndex = '20';
+            sceneNext.style.transform = 'translateY(' + sceneHeight + 'px)';
+            void sceneNext.offsetWidth;
+        }
+
+        if (sceneCurrent) {
+            sceneCurrent.style.transition = 'transform ' + duration + 'ms ease';
+            sceneCurrent.style.transform = 'translateY(' + (-sceneHeight) + 'px)';
+        }
+        if (sceneNext) {
+            sceneNext.style.transition = 'transform ' + duration + 'ms ease';
+            sceneNext.style.transform = 'translateY(0)';
+        }
+
+        setTimeout(function() {
+            currentIndex = (currentIndex + 1) % items.length;
+            rotateAfterNext();
+            cleanupDrag();
+            notifyIndexChange();
+        }, duration + 20);
+    };
+
+    window.__reelsSwipePrev = function() {
+        if (isAnimating || !items || items.length === 0) return;
+
+        var duration = 280;
+        sceneHeight = sceneCurrent ? sceneCurrent.getBoundingClientRect().height : window.innerHeight;
+        isAnimating = true;
+        if (config.isVideo) {
+            pauseVideo(mediaCurrent);
+            try { if (mediaPrev) mediaPrev.currentTime = 0; } catch (e) {}
+        }
+
+        if (scenePrev) {
+            scenePrev.style.transition = 'none';
+            scenePrev.style.zIndex = '20';
+            scenePrev.style.transform = 'translateY(' + (-sceneHeight) + 'px)';
+            void scenePrev.offsetWidth;
+        }
+
+        if (sceneCurrent) {
+            sceneCurrent.style.transition = 'transform ' + duration + 'ms ease';
+            sceneCurrent.style.transform = 'translateY(' + sceneHeight + 'px)';
+        }
+        if (scenePrev) {
+            scenePrev.style.transition = 'transform ' + duration + 'ms ease';
+            scenePrev.style.transform = 'translateY(0)';
+        }
+
+        setTimeout(function() {
+            currentIndex = (currentIndex - 1 + items.length) % items.length;
+            rotateAfterPrev();
+            cleanupDrag();
+            notifyIndexChange();
+        }, duration + 20);
+    };
+
+    // Incrementa o contador de share em todos os itens do owner (chamado pelo C# após share bem-sucedido).
+    window.__reelsBumpShareForOwner = function(accountId) {
+        if (!accountId || !items) return;
+        items.forEach(function(it) {
+            if (it && it.accountId === accountId) {
+                it.shareCount = (Number(it.shareCount) || 0) + 1;
+            }
+        });
+        refreshAllRailVisuals();
+    };
+
+    window.__reelsGoBack = function() {
+        if (dotnetHelper) {
+            dotnetHelper.invokeMethodAsync('GoBackFromJS');
+        } else if (window.history.length > 1) {
+            window.history.back();
+        } else {
+            window.location.href = '/';
+        }
+    };
+
+    // Animação "pop" no coração ao curtir: escala rápida + partículas flutuantes.
+    // Chamado com isLike=true (animação de like) ou isLike=false (animação sutil de descurtir).
+    window.__reelsLikeBurst = function(isLike) {
+        try {
+            var heart = null;
+            // Prioridade 1: o botão de like da CENA ATUAL (único visível no viewport)
+            if (sceneCurrent) {
+                heart = sceneCurrent.querySelector('[data-reels-like-btn], .reels-like-btn');
+            }
+            // Fallback: o primeiro botão visível no viewport (estilo antigo — fora do Reels, ex: perfil)
+            if (!heart) {
+                var btns = document.querySelectorAll('[data-reels-like-btn], .reels-like-btn, button[aria-label="Curtir"], button[title="Curtir"], button[title="Curtido"]');
+                for (var i = 0; i < btns.length; i++) {
+                    var b = btns[i];
+                    var r = b.getBoundingClientRect();
+                    // Precisa estar de fato dentro do viewport (botões em cenas offscreen têm rect mas fora da tela)
+                    if (r.width > 0 && r.height > 0 && r.top < window.innerHeight && r.bottom > 0 && r.left < window.innerWidth && r.right > 0) {
+                        heart = b;
+                        break;
+                    }
+                }
+            }
+            if (!heart) return;
+            heart.classList.remove('heart-pop', 'heart-shrink');
+            // Force reflow para reiniciar a animação
+            void heart.offsetWidth;
+            heart.classList.add(isLike ? 'heart-pop' : 'heart-shrink');
+            setTimeout(function() { try { heart.classList.remove('heart-pop', 'heart-shrink'); } catch (e) {} }, 600);
+
+            if (isLike) {
+                // Partículas flutuantes usando o coração oficial da marca (favicon-v2.png,
+                // mesmo ícone do logotipo "NossoL❤VE" e do botão de conteúdo exclusivo).
+                var rect = heart.getBoundingClientRect();
+                for (var k = 0; k < 5; k++) {
+                    (function(idx) {
+                        var size = 18 + Math.random() * 12;
+                        var img = document.createElement('img');
+                        img.src = '/favicon-v2.png';
+                        img.alt = '';
+                        img.draggable = false;
+                        img.style.cssText = 'position:fixed;pointer-events:none;z-index:9999;width:' + size + 'px;height:' + size + 'px;left:' + (rect.left + rect.width / 2) + 'px;top:' + (rect.top + rect.height / 2) + 'px;transform:translate(-50%,-50%) scale(0.9);opacity:0.95;transition:transform .75s cubic-bezier(.2,.8,.2,1),opacity .75s ease;filter:drop-shadow(0 2px 6px rgba(220,38,38,.45));';
+                        document.body.appendChild(img);
+                        requestAnimationFrame(function() {
+                            var dx = (Math.random() - 0.5) * 80;
+                            var dy = -55 - Math.random() * 55;
+                            var rot = (Math.random() - 0.5) * 30;
+                            img.style.transform = 'translate(calc(-50% + ' + dx + 'px), calc(-50% + ' + dy + 'px)) scale(' + (0.75 + Math.random() * 0.5) + ') rotate(' + rot + 'deg)';
+                            img.style.opacity = '0';
+                        });
+                        setTimeout(function() { try { img.remove(); } catch (e) {} }, 800);
+                    })(k);
+                }
+            }
+        } catch (e) { /* silencioso */ }
+    };
+})();

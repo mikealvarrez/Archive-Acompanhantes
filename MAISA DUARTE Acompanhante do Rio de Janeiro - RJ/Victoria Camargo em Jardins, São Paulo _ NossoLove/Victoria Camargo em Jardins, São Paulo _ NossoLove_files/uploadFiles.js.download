@@ -1,0 +1,1009 @@
+window.registerCallback = function (dotnetRef) {
+    window._progressCallback = dotnetRef;
+    window.dotNetRef = dotnetRef; // Para uso pelo mediaStepUpload
+    console.log("[uploadFiles] Callback registrado com sucesso");
+};
+
+// ==========================================
+// Utilitário: Detecção e conversão de HEIC/HEIF para JPEG
+// Estratégia: servidor (Magick.NET) → canvas (Safari)
+// ==========================================
+
+/**
+ * Verifica se um File é HEIC/HEIF e converte para JPEG se necessário.
+ * @param {File} file - Arquivo original do input
+ * @returns {Promise<File>} - O mesmo arquivo ou um novo File convertido para JPEG
+ */
+async function convertHeicIfNeeded(file) {
+    var name = (file.name || '').toLowerCase();
+    var type = (file.type || '').toLowerCase();
+
+    var isHeic = type === 'image/heic' || type === 'image/heif'
+        || name.endsWith('.heic') || name.endsWith('.heif');
+
+    if (!isHeic) {
+        return file;
+    }
+
+    console.log("[heicConvert] Arquivo HEIC detectado: " + file.name + " (" + file.size + " bytes)");
+
+    // 1) Conversão server-side via Magick.NET (mais confiável)
+    try {
+        var converted = await convertHeicOnServer(file);
+        if (converted) {
+            return converted;
+        }
+    } catch (serverErr) {
+        console.warn("[heicConvert] Conversão server-side falhou:", serverErr.message);
+    }
+
+    // 2) Fallback: canvas (funciona no Safari que suporta HEIC nativamente)
+    try {
+        var converted = await convertHeicViaCanvas(file);
+        if (converted) {
+            return converted;
+        }
+    } catch (canvasErr) {
+        console.warn("[heicConvert] Canvas falhou:", canvasErr.message);
+    }
+
+    throw new Error("Não foi possível converter a imagem HEIC. Tente salvar como JPEG antes de enviar.");
+}
+
+/**
+ * Envia o arquivo HEIC ao servidor para conversão via Magick.NET.
+ * @param {File} file
+ * @returns {Promise<File>}
+ */
+async function convertHeicOnServer(file) {
+    console.log("[heicConvert] Enviando para conversão server-side...");
+
+    var form = new FormData();
+    form.append('file', file, file.name);
+
+    var response = await fetch('/api/files/convertheic', {
+        method: 'POST',
+        body: form
+    });
+
+    if (!response.ok) {
+        var errText = await response.text().catch(function() { return 'Erro desconhecido'; });
+        throw new Error("Server retornou " + response.status + ": " + errText);
+    }
+
+    var blob = await response.blob();
+    var newName = file.name.replace(/\.heic$/i, '.jpg').replace(/\.heif$/i, '.jpg');
+    var converted = new File([blob], newName, { type: 'image/jpeg' });
+    console.log("[heicConvert] Convertido via servidor: " + converted.name + " (" + converted.size + " bytes)");
+    return converted;
+}
+
+/**
+ * Tenta converter HEIC via canvas (funciona em navegadores que suportam HEIC nativamente, como Safari).
+ * @param {File} file
+ * @returns {Promise<File|null>}
+ */
+function convertHeicViaCanvas(file) {
+    return new Promise(function(resolve, reject) {
+        var url = URL.createObjectURL(file);
+        var img = new Image();
+        img.onload = function() {
+            try {
+                var canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                var ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                canvas.toBlob(function(blob) {
+                    URL.revokeObjectURL(url);
+                    canvas.width = 0;
+                    canvas.height = 0;
+                    if (blob) {
+                        var newName = file.name.replace(/\.heic$/i, '.jpg').replace(/\.heif$/i, '.jpg');
+                        var converted = new File([blob], newName, { type: 'image/jpeg' });
+                        console.log("[heicConvert] Convertido via canvas: " + converted.name + " (" + converted.size + " bytes)");
+                        resolve(converted);
+                    } else {
+                        reject(new Error("Canvas toBlob retornou null"));
+                    }
+                }, 'image/jpeg', 0.92);
+            } catch (e) {
+                URL.revokeObjectURL(url);
+                reject(e);
+            }
+        };
+        img.onerror = function() {
+            URL.revokeObjectURL(url);
+            reject(new Error("Navegador não consegue exibir imagem HEIC"));
+        };
+        img.src = url;
+    });
+}
+
+window.uploadFiles = {
+    /**
+     * Callback opcional (DotNetObjectReference) para barra de progresso no dashboard de documentos.
+     */
+    setDashboardUploadProgressCallback: function (dotnetRef) {
+        window._dashboardUploadProgressRef = dotnetRef;
+    },
+    clearDashboardUploadProgressCallback: function () {
+        window._dashboardUploadProgressRef = null;
+    },
+    // ==========================================
+    // Upload misto (fotos + vídeos) — detecta MIME e despacha para uploadPhotos/uploadStories
+    // ==========================================
+    uploadMixed: async (inputId) => {
+        const input = document.getElementById(inputId);
+        if (!input || input.files.length === 0) return;
+        const files = Array.from(input.files);
+        const images = files.filter(f => (f.type || '').startsWith('image/') ||
+            /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(f.name));
+        const videos = files.filter(f => (f.type || '').startsWith('video/') ||
+            /\.(mp4|mov|webm|mkv|avi|m4v|3gp|mpeg|mpg|ts|ogv|wmv|flv)$/i.test(f.name));
+
+        const ensureTemp = (id) => {
+            let el = document.getElementById(id);
+            if (!el) {
+                el = document.createElement('input');
+                el.type = 'file';
+                el.id = id;
+                el.style.display = 'none';
+                document.body.appendChild(el);
+            }
+            return el;
+        };
+
+        if (images.length > 0) {
+            const dt = new DataTransfer();
+            images.forEach(f => dt.items.add(f));
+            const tempInput = ensureTemp('__nlMixedPhotoInput');
+            tempInput.files = dt.files;
+            await window.uploadFiles.uploadPhotos('__nlMixedPhotoInput');
+        }
+        if (videos.length > 0) {
+            const dt = new DataTransfer();
+            videos.forEach(f => dt.items.add(f));
+            const tempInput = ensureTemp('__nlMixedVideoInput');
+            tempInput.files = dt.files;
+            await window.uploadFiles.uploadStories('__nlMixedVideoInput');
+        }
+
+        if (input) input.value = '';
+    },
+
+    // ==========================================
+    // Upload de Vídeos (Stories) - Robusto
+    // ==========================================
+    uploadStories: async (inputId) => {
+        const input = document.getElementById(inputId);
+        if (!input || input.files.length === 0) return;
+
+        const files = input.files;
+        const filesList = Array.from(files);
+
+        // Notifica início
+        await notifyStatus("Iniciando processo...", false, false);
+
+        const failedVideos = [];
+        const successfulVideos = [];
+
+        for (let i = 0; i < filesList.length; i++) {
+            const file = filesList[i];
+            const fileIndex = i + 1;
+            const totalFiles = filesList.length;
+
+            try {
+                // Validações pré-upload
+                if (file.size > 500 * 1024 * 1024) {
+                    throw new Error(`O arquivo ${file.name} é muito grande (Máx 500MB).`);
+                }
+
+                // Validação de tipo (mobile pode permitir tipos inesperados)
+                if (!file.type || !file.type.startsWith('video/')) {
+                    console.warn(`[uploadStories] Aviso: arquivo ${file.name} pode não ser um vídeo válido. Tipo: ${file.type || 'desconhecido'}`);
+                }
+
+                await notifyStatus(`Preparando vídeo ${fileIndex} de ${totalFiles}...`, false, false);
+
+                // Executa o upload
+                await uploadSingleFile(file, "/api/files/uploadstory", (percent) => {
+                    if (percent < 100) {
+                        notifyStatus(`Enviando vídeo ${fileIndex} de ${totalFiles} (${percent}%)...`, false, false);
+                    } else {
+                        notifyStatus(`Processando vídeo ${fileIndex} de ${totalFiles} no servidor... Aguarde.`, false, false);
+                    }
+                });
+
+                successfulVideos.push(file.name);
+                console.log(`[uploadStories] Vídeo ${file.name} enviado com sucesso`);
+
+            } catch (error) {
+                console.error("Erro no upload:", error);
+                failedVideos.push(`${file.name}: ${error.message}`);
+                // Continua para o próximo arquivo em vez de parar
+                await notifyStatus(`Erro em vídeo ${fileIndex}: ${error.message}`, false, false);
+                continue;
+            }
+        }
+
+        // Notificar resultado final
+        if (failedVideos.length === 0) {
+            await notifyStatus("Todos os vídeos foram enviados com sucesso!", true, false);
+        } else if (successfulVideos.length === 0) {
+            await notifyStatus(`Erro: nenhum vídeo foi enviado. ${failedVideos.join('; ')}`, true, true);
+        } else {
+            const failedCount = failedVideos.length;
+            const successCount = successfulVideos.length;
+            await notifyStatus(`${successCount} vídeo(s) enviado(s) com sucesso. ${failedCount} erro(s).`, true, false);
+        }
+
+        // Reset do input para permitir reselecionar os mesmos arquivos
+        if (input) {
+            input.value = "";
+        }
+    },
+
+    // ==========================================
+    // Upload de Fotos (Galeria)
+    // ==========================================
+    uploadPhotos: async (inputId) => {
+        const input = document.getElementById(inputId);
+        if (!input || input.files.length === 0) return;
+
+        const files = input.files;
+        const filesList = Array.from(files);
+        await notifyStatus("Iniciando envio de fotos...", false, false);
+
+        const failedPhotos = [];
+        const successfulPhotos = [];
+
+        for (let i = 0; i < filesList.length; i++) {
+            let file = filesList[i];
+            const indexStr = `${i + 1}/${filesList.length}`;
+
+            try {
+                await notifyStatus(`Enviando foto ${indexStr} (0%)...`, false, false);
+
+                // Converte HEIC/HEIF para JPEG se necessário
+                file = await convertHeicIfNeeded(file);
+
+                // Validação de tipo (mobile pode permitir tipos inesperados)
+                if (!file.type || !file.type.startsWith('image/')) {
+                    console.warn(`[uploadPhotos] Aviso: arquivo ${file.name} pode não ser uma imagem válida. Tipo: ${file.type || 'desconhecido'}`);
+                }
+
+                const responseText = await uploadSingleFile(file, "/api/files/uploadphoto", (percent) => {
+                    notifyStatus(`Enviando foto ${indexStr} (${percent}%)...`, false, false);
+                });
+
+                let result;
+                try {
+                    if (responseText && responseText.trim().startsWith("{")) {
+                        result = JSON.parse(responseText);
+                    } else {
+                        result = { success: true };
+                    }
+                } catch (parseError) {
+                    console.warn(`[uploadPhotos] Falha ao fazer parse JSON, assumindo sucesso: ${parseError.message}`);
+                    result = { success: true };
+                }
+
+                if (result.requiresConfirmation) {
+                    await notifyStatus("Aguardando confirmação...", false, false);
+                    const shouldKeep = await window._progressCallback.invokeMethodAsync(
+                        "AskFaceBlurConfirmation",
+                        result.message || "Nenhum rosto foi detectado nesta foto. Deseja manter?",
+                        result.originalPath,
+                        result.thumbnailPath
+                    );
+
+                    const confirmResponse = await fetch("/api/files/confirmphoto", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            confirm: shouldKeep,
+                            originalPath: result.originalPath,
+                            thumbnailPath: result.thumbnailPath,
+                            rawOriginalPath: result.rawOriginalPath,
+                            isPortrait: result.isPortrait || false
+                        })
+                    });
+
+                    if (!confirmResponse.ok) {
+                        throw new Error(`Erro ao confirmar foto: ${confirmResponse.statusText}`);
+                    }
+
+                    if (!shouldKeep) {
+                        await notifyStatus(`Foto ${indexStr} cancelada.`, false, false);
+                        failedPhotos.push(file.name);
+                        continue;
+                    }
+                }
+
+                successfulPhotos.push(file.name);
+                console.log(`[uploadPhotos] Foto ${file.name} enviada com sucesso`);
+
+            } catch (error) {
+                console.error("Erro foto:", error);
+                failedPhotos.push(`${file.name}: ${error.message}`);
+                // Continua para o próximo arquivo em vez de parar
+                await notifyStatus(`Erro em foto ${indexStr}: ${error.message}`, false, false);
+                continue;
+            }
+        }
+
+        // Notificar resultado final
+        if (failedPhotos.length === 0) {
+            await notifyStatus("Galeria atualizada com sucesso!", true, false);
+        } else if (successfulPhotos.length === 0) {
+            await notifyStatus(`Erro: nenhuma foto foi enviada. ${failedPhotos.join('; ')}`, true, true);
+        } else {
+            const failedCount = failedPhotos.length;
+            const successCount = successfulPhotos.length;
+            await notifyStatus(`${successCount} foto(s) enviada(s) com sucesso. ${failedCount} erro(s).`, true, false);
+        }
+
+        // Reset do input para permitir reselecionar os mesmos arquivos
+        if (input) {
+            input.value = "";
+        }
+    },
+
+    // ==========================================
+    // Upload de Documento por Nome (Dashboard)
+    // Retorna o path do arquivo para o Blazor
+    // ==========================================
+    uploadDocumentByName: async (inputId, fileName) => {
+        const input = document.getElementById(inputId);
+        if (!input || input.files.length === 0) {
+            console.error("[uploadDocumentByName] Input não encontrado ou sem arquivos:", inputId);
+            throw new Error("Nenhum arquivo selecionado");
+        }
+
+        // Encontra o arquivo pelo nome
+        let file = null;
+        for (let i = 0; i < input.files.length; i++) {
+            if (input.files[i].name === fileName) {
+                file = input.files[i];
+                break;
+            }
+        }
+
+        if (!file) {
+            // Se não encontrar pelo nome, usa o primeiro arquivo
+            file = input.files[0];
+        }
+
+        console.log("[uploadDocumentByName] Enviando:", file.name, "Tamanho:", file.size);
+
+        // Validação de tamanho (10MB)
+        if (file.size > 10 * 1024 * 1024) {
+            throw new Error("Arquivo muito grande. Máximo 10MB.");
+        }
+
+        const responseText = await uploadSingleFile(file, "/api/files/uploaddocument", (percent) => {
+            if (window._dashboardUploadProgressRef) {
+                window._dashboardUploadProgressRef.invokeMethodAsync("OnDashboardUploadProgress", percent).catch(function () {});
+            }
+        });
+
+        let result;
+        try {
+            if (responseText && responseText.trim().startsWith("{")) {
+                result = JSON.parse(responseText);
+            } else {
+                throw new Error("Resposta não é JSON");
+            }
+        } catch (parseError) {
+            console.error("[uploadDocumentByName] Erro ao fazer parse JSON:", parseError);
+            throw new Error("Resposta inválida do servidor");
+        }
+
+        console.log("[uploadDocumentByName] Upload concluído:", result);
+
+        if (result.success && result.path) {
+            return result.path;
+        } else {
+            throw new Error(result.error || "Resposta inválida do servidor");
+        }
+    },
+
+    // ==========================================
+    // Upload de Vídeo por Nome (Dashboard)
+    // Retorna o path do arquivo para o Blazor
+    // ==========================================
+    uploadVideoByName: async (inputId, fileName) => {
+        const input = document.getElementById(inputId);
+        if (!input || input.files.length === 0) {
+            console.error("[uploadVideoByName] Input não encontrado ou sem arquivos:", inputId);
+            throw new Error("Nenhum arquivo selecionado");
+        }
+
+        const file = input.files[0];
+        console.log("[uploadVideoByName] Enviando:", file.name, "Tamanho:", file.size);
+
+        // Validação de tamanho (500MB)
+        if (file.size > 500 * 1024 * 1024) {
+            throw new Error("Arquivo muito grande. Máximo 500MB.");
+        }
+
+        // Upload com progresso usando XHR
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", "/api/files/uploadvideo", true);
+
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable) {
+                    const percent = Math.round((e.loaded / e.total) * 100);
+                    if (window._dashboardUploadProgressRef) {
+                        window._dashboardUploadProgressRef.invokeMethodAsync("OnDashboardUploadProgress", percent).catch(function () {});
+                    }
+                }
+            };
+
+            xhr.onload = function () {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    try {
+                        const contentType = xhr.getResponseHeader("content-type");
+                        let result;
+                        if (contentType && contentType.includes("application/json")) {
+                            result = JSON.parse(xhr.responseText);
+                        } else {
+                            result = { success: true, path: xhr.responseText };
+                        }
+
+                        if (result.success && result.path) {
+                            console.log("[uploadVideoByName] Upload concluído:", result.path);
+                            resolve(result.path);
+                        } else {
+                            reject(new Error(result.error || "Resposta inválida"));
+                        }
+                    } catch (e) {
+                        console.error("[uploadVideoByName] Erro ao processar resposta:", e);
+                        reject(new Error("Erro ao processar resposta do servidor"));
+                    }
+                } else {
+                    reject(new Error(`Erro do servidor (${xhr.status})`));
+                }
+            };
+
+            xhr.onerror = function () {
+                reject(new Error("Falha na conexão de rede"));
+            };
+
+            const form = new FormData();
+            form.append("file", file, file.name);
+            xhr.send(form);
+        });
+    }
+};
+
+// Helper privado para status via Blazor
+async function notifyStatus(message, finished, error) {
+    if (window._progressCallback) {
+        try {
+            await window._progressCallback.invokeMethodAsync("UpdateUploadStatus", message, finished, error);
+        } catch (err) {
+            console.error("[notifyStatus] Erro ao notificar status:", err);
+        }
+    } else {
+        console.warn("[notifyStatus] _progressCallback não está disponível");
+    }
+}
+
+// Helper para detectar ambiente mobile
+function isMobileDevice() {
+    const userAgent = navigator.userAgent || navigator.vendor || window.opera;
+    const isMobile = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent.toLowerCase());
+    return isMobile;
+}
+
+// Log inicial de ambiente
+console.log(`[uploadFiles] Ambiente: ${isMobileDevice() ? 'MOBILE' : 'DESKTOP'}, User-Agent: ${navigator.userAgent}`);
+
+// ==========================================
+// Upload de Documento (Onboarding)
+// Retorna imediatamente para evitar timeout do SignalR.
+// O upload é executado em background via setTimeout.
+// IMPORTANTE: capturar input.files[0] no mesmo tick da chamada (antes de qualquer re-render do Blazor
+// que substitua o <input> e esvazie files — era a causa do "primeiro envio não vai, o segundo sim").
+// ==========================================
+window.uploadDocument = function(inputId, isFront) {
+    const input = document.getElementById(inputId);
+    if (!input || input.files.length === 0) {
+        console.error("[uploadDocument] Input não encontrado ou sem arquivos:", inputId);
+        setTimeout(function () {
+            notifyStatus("Nenhum arquivo selecionado.", true, true).catch(function () {});
+        }, 0);
+        return;
+    }
+    var file = input.files[0];
+    setTimeout(function () {
+        uploadDocumentAsync(file, isFront, inputId);
+    }, 0);
+};
+
+async function uploadDocumentAsync(file, isFront, inputId) {
+    // Converte HEIC/HEIF para JPEG se necessário
+    try {
+        file = await convertHeicIfNeeded(file);
+    } catch (convErr) {
+        await notifyStatus(convErr.message, true, true);
+        return;
+    }
+
+    const side = isFront ? "frente" : "verso";
+    console.log(`[uploadDocument] Iniciando upload (${side}):`, file.name, "Tamanho:", file.size);
+
+    // Validação de tamanho (10MB para documentos)
+    if (file.size > 10 * 1024 * 1024) {
+        await notifyStatus(`Arquivo muito grande. Máximo 10MB.`, true, true);
+        return;
+    }
+
+        await notifyStatus(`Enviando ${side} do documento (0%)...`, false, false);
+
+    try {
+        const responseText = await uploadSingleFile(file, "/api/files/uploaddocument", (percent) => {
+            notifyStatus(`Enviando ${side} do documento (${percent}%)...`, false, false);
+        });
+
+        let result;
+        try {
+            if (responseText && responseText.trim().startsWith("{")) {
+                result = JSON.parse(responseText);
+            } else {
+                throw new Error("Resposta não é JSON");
+            }
+        } catch (parseError) {
+            console.error("[uploadDocument] Erro ao fazer parse JSON:", parseError);
+            throw new Error("Resposta inválida do servidor");
+        }
+
+        console.log("[uploadDocument] Upload concluído:", result);
+
+        if (result.success && result.path) {
+            await notifyStatus(`${isFront ? "Frente" : "Verso"} enviado com sucesso!`, true, false);
+            // Notifica o Blazor com o path do documento
+            if (window._progressCallback) {
+                await window._progressCallback.invokeMethodAsync("OnDocumentUploaded", result.path, isFront);
+            }
+        } else {
+            throw new Error(result.error || "Resposta inválida do servidor");
+        }
+
+    } catch (error) {
+        console.error("[uploadDocument] Erro:", error);
+        await notifyStatus(error.message || "Erro ao enviar documento.", true, true);
+    }
+
+    // Reset do input para permitir reselecionar os mesmos arquivos
+    var inputEl = document.getElementById(inputId);
+    if (inputEl) {
+        inputEl.value = "";
+    }
+}
+
+// ==========================================
+// Upload de Vídeo de Autorização (Onboarding)
+// Retorna imediatamente para evitar timeout do SignalR.
+// O upload é executado em background via setTimeout.
+// ==========================================
+window.uploadAuthorizationVideo = function(inputId) {
+    const input = document.getElementById(inputId);
+    if (!input || input.files.length === 0) {
+        console.error("[uploadAuthorizationVideo] Input não encontrado ou sem arquivos:", inputId);
+        setTimeout(function () {
+            notifyStatus("Nenhum arquivo selecionado.", true, true).catch(function () {});
+        }, 0);
+        return;
+    }
+    var file = input.files[0];
+    setTimeout(function () {
+        uploadAuthorizationVideoAsync(file, inputId);
+    }, 0);
+};
+
+async function uploadAuthorizationVideoAsync(file, inputId) {
+    console.log("[uploadAuthorizationVideo] Iniciando upload:", file.name, "Tamanho:", file.size);
+
+    // Validação de tamanho (500MB)
+    if (file.size > 500 * 1024 * 1024) {
+        await notifyStatus("Arquivo muito grande. Máximo 500MB.", true, true);
+        return;
+    }
+
+    await notifyStatus("Preparando envio...", false, false);
+
+    try {
+        // Upload usando o mesmo padrão dos stories
+        await uploadSingleFile(file, "/api/files/uploadvideo", (percent) => {
+            if (percent < 100) {
+                notifyStatus(`Enviando vídeo (${percent}%)...`, false, false);
+            } else {
+                notifyStatus("Processando vídeo no servidor... Aguarde.", false, false);
+            }
+        });
+
+        // Upload concluído com sucesso (mesmo que retorne texto vazio, a API já salvou)
+        console.log("[uploadAuthorizationVideo] Upload concluído com sucesso");
+        await notifyStatus("Vídeo enviado com sucesso!", true, false);
+        
+        // Notifica o Blazor para recarregar o vídeo do usuário
+        if (window._progressCallback) {
+            await window._progressCallback.invokeMethodAsync("OnVideoUploadedRefresh");
+        }
+
+    } catch (error) {
+        console.error("[uploadAuthorizationVideo] Erro:", error);
+        await notifyStatus(error.message || "Erro ao enviar vídeo.", true, true);
+    }
+
+    var inputEl = document.getElementById(inputId);
+    if (inputEl) {
+        inputEl.value = "";
+    }
+}
+
+// Helper para upload com XHR (Progresso Real)
+function uploadSingleFile(file, url, onProgress) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", url, true);
+
+        // Progresso
+        xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+                const percent = Math.round((e.loaded / e.total) * 100);
+                if (onProgress) {
+                    onProgress(percent);
+                }
+            }
+        };
+
+        // Conclusão
+        xhr.onload = function () {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                resolve(xhr.responseText);
+            } else {
+                let msg = `Erro do servidor (${xhr.status})`;
+                if (xhr.responseText) msg += `: ${xhr.responseText}`;
+                reject(new Error(msg));
+            }
+        };
+
+        // Erros de rede
+        xhr.onerror = function () {
+            reject(new Error("Falha na conexão de rede. Verifique sua internet."));
+        };
+
+        // Timeout para abortar upload muito lento (5 minutos para arquivos grandes)
+        xhr.timeout = 5 * 60 * 1000;
+        xhr.ontimeout = function () {
+            reject(new Error("Upload expirou. A conexão foi muito lenta ou o servidor não respondeu."));
+        };
+
+        const form = new FormData();
+        form.append("file", file, file.name);
+        xhr.send(form);
+    });
+}
+
+// ==========================================
+// Media Step - Leitura local de arquivo para Cropper
+// Evita transferência via SignalR
+// ==========================================
+
+/**
+ * Redimensiona uma imagem usando canvas para reduzir o tamanho antes de enviar via SignalR.
+ * Mantém a proporção original, limita dimensão máxima e comprime em JPEG.
+ * @param {string} dataUrl - DataURL original (pode ser muito grande para fotos de câmera)
+ * @param {number} maxDimension - Dimensão máxima permitida (largura ou altura)
+ * @param {number} quality - Qualidade JPEG (0.0 a 1.0)
+ * @returns {Promise<string>} DataURL redimensionado
+ */
+function resizeImageForCropper(dataUrl, maxDimension, quality) {
+    maxDimension = maxDimension || 2048;
+    quality = quality || 0.85;
+
+    return new Promise(function(resolve, reject) {
+        var img = new Image();
+        img.onload = function() {
+            var w = img.naturalWidth;
+            var h = img.naturalHeight;
+
+            // Se já é pequena o suficiente, retorna o original
+            if (w <= maxDimension && h <= maxDimension && dataUrl.length < 500000) {
+                resolve(dataUrl);
+                return;
+            }
+
+            // Calcula novas dimensões mantendo proporção
+            var scale = 1;
+            if (w > maxDimension || h > maxDimension) {
+                scale = Math.min(maxDimension / w, maxDimension / h);
+            }
+
+            var newW = Math.round(w * scale);
+            var newH = Math.round(h * scale);
+
+            var canvas = document.createElement('canvas');
+            canvas.width = newW;
+            canvas.height = newH;
+
+            var ctx = canvas.getContext('2d');
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, 0, 0, newW, newH);
+
+            var resized = canvas.toDataURL('image/jpeg', quality);
+            console.log("[mediaStepUpload] Imagem redimensionada: " + w + "x" + h + " -> " + newW + "x" + newH + " (" + Math.round(resized.length / 1024) + "KB base64)");
+
+            // Libera memória
+            canvas.width = 0;
+            canvas.height = 0;
+
+            resolve(resized);
+        };
+        img.onerror = function() {
+            reject(new Error("Falha ao carregar imagem para redimensionamento"));
+        };
+        img.src = dataUrl;
+    });
+}
+
+window.mediaStepUpload = {
+    /**
+     * Lê o arquivo selecionado localmente e notifica o Blazor para abrir o cropper
+     * @param {string} inputId - ID do input de arquivo
+     * @param {boolean} isProfile - true para foto de perfil, false para capa
+     */
+    readAndOpenCropper: async function(inputId, isProfile) {
+        try {
+            const input = document.getElementById(inputId);
+            if (!input || !input.files || input.files.length === 0) {
+                console.warn("[mediaStepUpload] Nenhum arquivo selecionado");
+                return;
+            }
+
+            // Converte HEIC/HEIF para JPEG se necessário (antes de qualquer processamento)
+            let file = await convertHeicIfNeeded(input.files[0]);
+            
+            console.log("[mediaStepUpload] Arquivo selecionado: " + file.name + ", Tamanho: " + file.size + ", Tipo: " + file.type);
+
+            // Validação de tamanho (25MB - fotos das modelos)
+            if (file.size > 25 * 1024 * 1024) {
+                if (window.dotNetRef) {
+                    await window.dotNetRef.invokeMethodAsync('OnFileReadError', 'Arquivo muito grande. Máximo 25MB.');
+                }
+                input.value = '';
+                return;
+            }
+
+            // Validação de tipo - mais flexível para mobile
+            if (!file.type || (!file.type.startsWith("image/") && !file.type.startsWith("application/octet-stream"))) {
+                console.warn("[mediaStepUpload] Aviso de tipo: " + (file.type || 'desconhecido'));
+                // Não falha aqui, deixa o FileReader tentar
+            }
+
+            // Lê o arquivo como DataURL (base64) - localmente, sem enviar ao servidor
+            const reader = new FileReader();
+            
+            reader.onload = async function(e) {
+                try {
+                    const dataUrl = e.target.result;
+                    if (!dataUrl) {
+                        throw new Error("FileReader retornou resultado vazio");
+                    }
+                    
+                    console.log("[mediaStepUpload] Arquivo lido com sucesso, tamanho base64: " + dataUrl.length);
+                    
+                    // Redimensiona a imagem ANTES de enviar via SignalR
+                    // Isso evita enviar 30MB+ de base64 pelo websocket
+                    var resizedDataUrl = await resizeImageForCropper(dataUrl, 2048, 0.90);
+                    console.log("[mediaStepUpload] Tamanho após resize: " + resizedDataUrl.length + " (original: " + dataUrl.length + ")");
+                    
+                    if (window.dotNetRef) {
+                        await window.dotNetRef.invokeMethodAsync('OnFileReadForCropper', resizedDataUrl, isProfile);
+                    }
+                    input.value = '';
+                } catch (err) {
+                    console.error("[mediaStepUpload] Erro no callback:", err);
+                    if (window.dotNetRef) {
+                        await window.dotNetRef.invokeMethodAsync('OnFileReadError', "Erro ao processar arquivo: " + err.message);
+                    }
+                    input.value = '';
+                }
+            };
+            
+            reader.onerror = async function(err) {
+                console.error("[mediaStepUpload] Erro no FileReader:", err);
+                const errorMsg = reader.error ? reader.error.name : 'Erro desconheido';
+                if (window.dotNetRef) {
+                    await window.dotNetRef.invokeMethodAsync('OnFileReadError', `Erro ao ler arquivo: ${errorMsg}`);
+                }
+                input.value = '';
+            };
+            
+            reader.onabort = async function() {
+                console.warn("[mediaStepUpload] Leitura do arquivo foi abortada");
+                if (window.dotNetRef) {
+                    await window.dotNetRef.invokeMethodAsync('OnFileReadError', 'Leitura cancelada');
+                }
+                input.value = '';
+            };
+            
+            reader.readAsDataURL(file);
+        } catch (error) {
+            console.error("[mediaStepUpload] Erro:", error);
+            if (window.dotNetRef) {
+                await window.dotNetRef.invokeMethodAsync('OnFileReadError', error.message || 'Erro ao processar arquivo');
+            }
+        }
+    }
+};
+
+// ==========================================
+// Deletar arquivo de vídeo via API
+// ==========================================
+window.deleteVideoFile = async function(videoUrl) {
+    try {
+        if (!videoUrl) {
+            console.error("[deleteVideoFile] URL do vídeo não fornecida");
+            return false;
+        }
+
+        // Extrair o path relativo da URL (ex: /api/files/documents/username/file.mp4 -> documents/username/file.mp4)
+        let relativePath = videoUrl;
+        if (relativePath.startsWith("/api/files/")) {
+            relativePath = relativePath.substring("/api/files/".length);
+        }
+
+        console.log(`[deleteVideoFile] Deletando: /api/files/${relativePath}`);
+
+        const response = await fetch(`/api/files/${relativePath}`, {
+            method: "DELETE"
+        });
+
+        if (response.ok) {
+            console.log("[deleteVideoFile] Arquivo deletado com sucesso");
+            return true;
+        } else {
+            console.error(`[deleteVideoFile] Erro ao deletar: ${response.status} ${response.statusText}`);
+            return false;
+        }
+    } catch (error) {
+        console.error("[deleteVideoFile] Erro:", error);
+        return false;
+    }
+};
+
+// ==========================================
+// Upload de foto recortada (base64) via HTTP
+// ==========================================
+window.uploadCroppedPhoto = async function(base64Data, category, dotnetHelper) {
+    try {
+        if (!base64Data) {
+            throw new Error("Dados base64 vazios");
+        }
+
+        const parts = base64Data.split(',');
+        if (parts.length < 2) {
+            throw new Error("Formato de base64 inválido");
+        }
+
+        const byteString = atob(parts[1]);
+        const mimeMatch = parts[0].match(/:(.*?);/);
+        const mimeString = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+        
+        const ab = new ArrayBuffer(byteString.length);
+        const ia = new Uint8Array(ab);
+        for (let i = 0; i < byteString.length; i++) {
+            ia[i] = byteString.charCodeAt(i);
+        }
+        const blob = new Blob([ab], { type: mimeString });
+
+        console.log(`[uploadCroppedPhoto] Blob criado: ${blob.size} bytes, Tipo: ${blob.type}`);
+
+        const formData = new FormData();
+        formData.append('file', blob, 'cropped-image.jpg');
+        formData.append('category', category);
+
+        const responseText = await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", "/api/files/uploadcroppedphoto", true);
+            xhr.upload.onprogress = function (e) {
+                if (e.lengthComputable) {
+                    const pct = Math.round((e.loaded / e.total) * 100);
+                    notifyStatus(`Enviando foto recortada (${pct}%)...`, false, false).catch(function () {});
+                }
+            };
+            xhr.onload = function () {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve(xhr.responseText);
+                } else {
+                    reject(new Error(xhr.responseText || `Erro HTTP ${xhr.status}`));
+                }
+            };
+            xhr.onerror = function () {
+                reject(new Error("Falha na conexão de rede"));
+            };
+            xhr.timeout = 5 * 60 * 1000;
+            xhr.ontimeout = function () {
+                reject(new Error("Upload expirou"));
+            };
+            xhr.send(formData);
+        });
+
+        let result;
+        try {
+            if (responseText && responseText.trim().startsWith("{")) {
+                result = JSON.parse(responseText);
+            } else {
+                throw new Error("Resposta não é JSON");
+            }
+        } catch (parseError) {
+            console.error("[uploadCroppedPhoto] Erro ao fazer parse JSON:", parseError);
+            throw new Error("Resposta inválida do servidor");
+        }
+
+        if (result.requiresConfirmation && dotnetHelper) {
+            try {
+                const shouldKeep = await dotnetHelper.invokeMethodAsync(
+                    "AskFaceBlurConfirmation",
+                    result.message || "Nenhum rosto foi detectado nesta foto. Deseja manter?",
+                    result.originalPath,
+                    result.thumbnailPath
+                );
+
+                const confirmResponse = await fetch("/api/files/confirmcroppedphoto", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        confirm: shouldKeep,
+                        originalPath: result.originalPath,
+                        thumbnailPath: result.thumbnailPath,
+                        rawOriginalPath: result.rawOriginalPath,
+                        isPortrait: result.isPortrait || false,
+                        category: result.category || category
+                    })
+                });
+
+                if (!confirmResponse.ok) {
+                    throw new Error(`Erro ao confirmar foto: ${confirmResponse.statusText}`);
+                }
+
+                if (!shouldKeep) {
+                    return { success: true, cancelled: true };
+                }
+
+                return { success: true, confirmed: true };
+            } catch (confirmError) {
+                console.error("[uploadCroppedPhoto] Erro na confirmação:", confirmError);
+                return { success: false, error: confirmError.message };
+            }
+        }
+
+        console.log("[uploadCroppedPhoto] Sucesso:", result);
+        return result;
+    } catch (error) {
+        console.error("[uploadCroppedPhoto] Erro:", error);
+        return { success: false, error: error.message };
+    }
+};
+
+// Onboarding: volta ao topo ao mudar de etapa (scroll da janela)
+window.scrollPageToTop = function () {
+    try {
+        window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    } catch (e) {
+        try {
+            window.scrollTo(0, 0);
+        } catch (e2) { /* ignore */ }
+    }
+    try {
+        if (document.documentElement) document.documentElement.scrollTop = 0;
+        if (document.body) document.body.scrollTop = 0;
+    } catch (e) { /* ignore */ }
+};
