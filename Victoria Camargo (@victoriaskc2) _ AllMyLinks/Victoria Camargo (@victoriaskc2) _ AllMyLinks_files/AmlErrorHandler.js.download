@@ -1,0 +1,123 @@
+class AmlErrorHandler {
+    constructor() {
+        this.csrf_param = '_csrf-frontend';
+        this.csrf_token = $('meta[name="csrf-token"]').attr('content');
+        this.serverEndpoint = '/event/js-error-log';
+        this.timeoutInterval = 10000; // Regular interval: 10 seconds
+        this.initialDelay = 2000; // First send delay: 2 seconds
+        this.errorBuffer = [];
+        this.sending = false;
+        this.firstSendScheduled = false; // Track if the first send has been scheduled
+
+        this.init();
+    }
+
+    init() {
+        window.addEventListener('error', (event) => this.captureError(event));
+        window.addEventListener('unhandledrejection', (event) => this.captureRejection(event));
+        window.addEventListener('beforeunload', () => this.sendErrorsOnUnload());
+    }
+
+    captureError(event) {
+        // Cross-origin scripts without crossorigin="anonymous" produce a sanitized
+        // "Script error." with no file/line/stack — discard, nothing useful to log.
+        if (!event.message || event.message === 'Script error.') {
+            return;
+        }
+
+        this.errorBuffer.push({
+            type: 'Synchronous error',
+            message: event.message,
+            source: event.filename,
+            line: event.lineno,
+            column: event.colno,
+            stack: event.error?.stack || 'No stack trace',
+            timestamp: new Date().toISOString(),
+            url: window.location.href,
+        });
+
+        this.scheduleErrorSend();
+    }
+
+    captureRejection(event) {
+        this.errorBuffer.push({
+            type: 'Unhandled Rejection',
+            message: event.reason?.message || 'Unhandled rejection',
+            stack: event.reason?.stack || 'No stack trace',
+            timestamp: new Date().toISOString(),
+        });
+
+        this.scheduleErrorSend();
+    }
+
+    scheduleErrorSend() {
+        if (!this.firstSendScheduled) {
+            this.firstSendScheduled = true;
+
+            setTimeout(() => {
+                if (this.errorBuffer.length > 0) {
+                    this.sendErrors().then(() => {
+                        this.schedulePeriodicSend(); // Start regular interval after the first send
+                    });
+                } else {
+                    // If no errors exist, start regular periodic sending anyway
+                    this.schedulePeriodicSend();
+                }
+            }, this.initialDelay);
+        } else if (!this.sending) {
+            this.schedulePeriodicSend();
+        }
+    }
+
+    schedulePeriodicSend() {
+        this.sending = true; // Prevent multiple parallel requests
+
+        setTimeout(() => {
+            this.sendErrors().then(() => {
+                this.sending = false; // Allow the next error batch to be sent
+                if (this.errorBuffer.length > 0) {
+                    this.schedulePeriodicSend(); // Reschedule if new errors have arrived
+                }
+            });
+        }, this.timeoutInterval); // Wait for the regular interval
+    }
+
+    async sendErrors() {
+        if (this.errorBuffer.length === 0) {
+            this.sending = false;
+            return;
+        }
+
+        const body = JSON.stringify(this.errorBuffer);
+
+        try {
+            const response = await fetch(this.serverEndpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': this.csrf_token,
+                },
+                body,
+            });
+
+            if (response.ok) {
+                console.log('Errors successfully sent to the server.');
+                this.errorBuffer.length = 0; // Clear the buffer after successful send
+            } else {
+                console.error('Failed to send errors to the server.');
+            }
+        } catch (err) {
+            console.error('Error reporting failed:', err.message);
+        }
+    }
+
+    sendErrorsOnUnload() {
+        if (this.errorBuffer.length > 0) {
+            const payload = JSON.stringify({
+                [this.csrf_param]: this.csrf_token, // Add CSRF token dynamically
+                errors: this.errorBuffer, // Include the buffered errors
+            });
+            navigator.sendBeacon(this.serverEndpoint, new Blob([payload], { type: "application/json" }));
+        }
+    }
+}
