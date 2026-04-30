@@ -1,0 +1,27 @@
+const menuToggler = document.querySelector('.user-menu-wrap .toggler');
+const menuCloser = document.querySelector('.user-menu-inner .close');
+const menuOverlay = document.querySelector('.user-menu-overlay');
+const menuInnerBlock = document.querySelector('.user-menu-inner');
+
+menuInnerBlock.addEventListener('click', (e) => {
+    e.stopPropagation();
+});
+
+menuToggler.addEventListener('click', (e) => {
+    e.stopPropagation();
+    menuInnerBlock.classList.add('active');
+    menuOverlay.classList.add('active');
+    document.body.classList.add('-user-menu-open');
+});
+
+menuCloser.addEventListener('click', () => {
+    menuInnerBlock.classList.remove('active');
+    menuOverlay.classList.remove('active');
+    document.body.classList.remove('-user-menu-open');
+});
+
+menuOverlay.addEventListener('click', () => {
+    menuInnerBlock.classList.remove('active');
+    menuOverlay.classList.remove('active');
+    document.body.classList.remove('-user-menu-open');
+});

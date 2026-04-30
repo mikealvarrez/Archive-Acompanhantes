@@ -1,0 +1,7 @@
+// JavaScript Document
+function popUpForm(){
+			window.open('form_anuncie.php', '_blank', 'width=580px,height=515,toolbar=no,scrollbars=no,resizable=no,status=no,menubar=no,location=no');
+		}
+function popUpFormFotos(){
+			window.open('form_marcar_fotos.php', '_blank', 'width=380px,height=315,toolbar=no,scrollbars=no,resizable=no,status=no,menubar=no,location=no');
+		}

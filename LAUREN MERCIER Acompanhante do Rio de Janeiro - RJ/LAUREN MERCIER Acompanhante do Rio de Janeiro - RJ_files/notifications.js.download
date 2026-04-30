@@ -1,0 +1,36 @@
+const notificationsToggler = document.querySelector('.notifications-wrap .toggler');
+const notificationsCloser = document.querySelector('.notifications-inner .close');
+const notificationsOverlay = document.querySelector('.notifications-overlay');
+const notificationsInnerBlock = document.querySelector('.notifications-inner');
+
+notificationsInnerBlock.addEventListener('click', (e) => {
+    e.stopPropagation();
+});
+
+notificationsToggler.addEventListener('click', (e) => {
+    e.stopPropagation();
+    notificationsInnerBlock.classList.add('active');
+    notificationsOverlay.classList.add('active');
+    document.body.classList.add('-notifications-open');
+
+
+    jQuery.get('/notifications.php?action=markallread', function(data){
+       jQuery('.count').html('0');
+       jQuery('.count').hide();
+    }, 'json');
+
+    console.log('Mark All Read');
+    console.log(jQuery);
+});
+
+notificationsCloser.addEventListener('click', () => {
+    notificationsInnerBlock.classList.remove('active');
+    notificationsOverlay.classList.remove('active');
+    document.body.classList.remove('-notifications-open');
+});
+
+notificationsOverlay.addEventListener('click', () => {
+    notificationsInnerBlock.classList.remove('active');
+    notificationsOverlay.classList.remove('active');
+    document.body.classList.remove('-notifications-open');
+});
