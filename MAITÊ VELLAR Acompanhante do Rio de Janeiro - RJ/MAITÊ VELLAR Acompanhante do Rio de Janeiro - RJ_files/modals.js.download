@@ -1,0 +1,18 @@
+jQuery('.cc-modal-overlay').click(function () {
+    jQuery(this).removeClass('active');
+    jQuery('body').removeClass('-modal-open');
+});
+
+jQuery('.modal-close, .modal-close-button').click(function () {
+    jQuery('.cc-modal').removeClass('active');
+    jQuery('body').removeClass('-modal-open');
+});
+
+jQuery('.cc-modal .modal-inner-wrap').click(function (e) {
+    e.stopPropagation();
+});
+
+jQuery('.modal-button-close').click(function () {
+    jQuery('.cc-modal').removeClass('active');
+    jQuery('body').removeClass('-modal-open');
+});
